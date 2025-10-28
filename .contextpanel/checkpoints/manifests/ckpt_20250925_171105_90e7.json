@@ -1,0 +1,38 @@
+{
+  "id": "ckpt_20250925_171105_90e7",
+  "projectId": "default",
+  "label": "auto-before-restore",
+  "createdAt": "2025-09-25T17:11:05Z",
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "sha": "06c872aba297270f524a42294be2d29b8f49a38d",
+      "size": 210
+    },
+    {
+      "path": "file1.md",
+      "sha": "54d1baa10332905f39dfc12c8386cf035b1f4da6",
+      "size": 15
+    },
+    {
+      "path": "file2.md",
+      "sha": "2b0fbe66066498c481b6b796cb9576c70d4ca55a",
+      "size": 50
+    },
+    {
+      "path": "Main.java",
+      "sha": "edee63fb87c82586ebb7661ebd29f3ff369effb1",
+      "size": 250
+    },
+    {
+      "path": "com/example/Parser.java",
+      "sha": "21186fd554690ba824978ed3bf24b9abdf535383",
+      "size": 2087
+    },
+    {
+      "path": "com/example/util/StringUtils.java",
+      "sha": "c4de52ec991b9603108008dc8d611e0bc296bb51",
+      "size": 1402
+    }
+  ]
+}

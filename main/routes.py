@@ -1,0 +1,849 @@
+# main/routes.py
+from fastapi import APIRouter, HTTPException, Query, Request
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Set
+import re
+import os
+import json
+import time
+import asyncio
+from pydantic import BaseModel
+from typing import Literal
+from sse_starlette.sse import EventSourceResponse
+from .java_indexer import index_workspace
+from .compare_utils import compare_states
+from .utils import WORKSPACE, ensure_workspace
+from .snippets import build_snippet_pack
+from .patch_utils import apply_unified_patch_with_guards, RegionLockViolationError
+from .checkpoint_utils import create_checkpoint, list_checkpoints, MANI, _restore_apply
+from .diagnostic_utils import (
+    run_javac_compile, parse_javac_output, map_diags_to_anchors,
+    run_gradle_test_if_available, parse_gradle_test
+)
+from .diagnostics_utils import compile_project, summarize
+from .graph_utils import build_graph
+from .relations_utils import build_relations_basic
+from .diff_utils import method_line_diff
+from .event_bus import BUS
+from .watcher import start_watcher
+
+router = APIRouter()
+
+# ---- External AI Job store (in-memory) ----
+from typing import Dict, Any
+from uuid import uuid4
+from threading import RLock
+import time, os, requests
+
+AI_JOBS: Dict[str, Dict[str, Any]] = {}
+AI_LOCK = RLock()
+
+EXTERNAL_AI_URL = os.getenv("EXTERNAL_AI_URL")         # 예: https://ai.example.com
+EXTERNAL_AI_KEY = os.getenv("EXTERNAL_AI_KEY")         # Bearer 키
+PUBLIC_BASE_URL  = os.getenv("PUBLIC_BASE_URL", "")    # 예: http://127.0.0.1:8000
+AI_CALLBACK_SECRET = os.getenv("AI_CALLBACK_SECRET", "dev-secret")
+
+# 앱 시작 시 워처 가동
+_watcher_started = False
+
+def ensure_watcher():
+    global _watcher_started
+    if not _watcher_started:
+        start_watcher()
+        _watcher_started = True
+
+# Pydantic models
+class CompareReq(BaseModel):
+    projectId: str
+    from_: Optional[str] = None  # 'ckpt_xxx' | 'working' | 'dir:/path'
+    to: str = "working"
+    scope: Optional[List[str]] = None  # ["src/**"]
+
+class SnippetReq(BaseModel):
+    projectId: str
+    anchors: List[str]
+    contextLines: int = 3
+    baseline: str = "working"
+    scope: Optional[List[str]] = None  # 예: ["src/**"]
+
+class ApplyReq(BaseModel):
+    projectId: str
+    targets: List[str]                # ex) ["m:com.foo.Bar.parse(String)"]
+    allowedOps: List[str]             # ["EDIT_METHOD_BODY","ADD_IMPORT"]
+    patch: Dict[str, Any]             # {"format":"unified","diff":"...","file":"src/.../Bar.java"}
+    rationale: Optional[str] = None
+
+class DiagnoseReq(BaseModel):
+    projectId: str
+    targets: Optional[List[str]] = None  # 지금은 전체 컴파일. 후속에 선택적 빌드로 확장
+    pipeline: List[str] = ["compile"]    # ["compile","test"] 등
+
+class CkptCreateReq(BaseModel):
+    projectId: str
+    label: str = "manual"
+
+class RestoreReq(BaseModel):
+    projectId: str
+    checkpointId: str
+    mode: Literal["dry-run", "apply"] = "dry-run"
+
+class DiffApplyReq(BaseModel):
+    projectId: str
+    diff: str  # Unified diff content
+
+@router.get("/health")
+def health():
+    return {"ok": True, "area": "main"}
+
+@router.api_route("/layout/basic", methods=["GET", "POST"])
+async def layout_basic(
+    request: Request,
+    projectId: Optional[str] = Query(None),
+    maxMethodLines: Optional[int] = Query(20),
+    baseline: Optional[str] = Query(None),
+    withRelations: Optional[bool] = Query(True)
+):
+    """
+    기본 자바 코드 레이아웃 반환 (GET/POST 모두 지원)
+    """
+    try:
+        # POST 요청인 경우 body에서 파라미터 추출
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                project_id = body.get("projectId") or "default"
+                max_method_lines = body.get("maxMethodLines") or 20
+                baseline_val = body.get("baseline")
+                with_relations = body.get("withRelations", True)
+            except:
+                # JSON 파싱 실패 시 기본값 사용
+                project_id = "default"
+                max_method_lines = 20
+                baseline_val = None
+                with_relations = True
+        else:
+            # GET 요청인 경우 쿼리 파라미터 사용
+            project_id = projectId or "default"
+            max_method_lines = maxMethodLines or 20
+            baseline_val = baseline
+            with_relations = withRelations if withRelations is not None else True
+
+        workspace_path = ensure_workspace()
+        if not workspace_path:
+            # 워크스페이스가 설정되지 않았으면 빈 결과 반환
+            return {"packages": [], "projectId": project_id, "view": "basic"}
+
+        workspace = Path(workspace_path)
+        data = index_workspace(workspace)
+        
+        # maxMethodLines 기준으로 collapsed 플래그 조정
+        for pkg in data["packages"]:
+            for cls in pkg["classes"]:
+                for method in cls["methods"]:
+                    method["collapsed"] = bool(method.get("loc", 0) > max_method_lines)
+        
+        resp = {
+            "projectId": project_id,
+            "view": "basic",
+            "packages": data["packages"],
+            "relations": build_relations_basic() if with_relations else []
+        }
+        
+        # baseline이 있으면 오버레이 추가
+        if baseline_val:
+            try:
+                overlay = compare_states(baseline_val, "working")
+                resp["overlay"] = overlay
+            except Exception as overlay_error:
+                # 오버레이 실패해도 기본 레이아웃은 반환
+                resp["overlay"] = {"error": str(overlay_error), "changes": []}
+        
+        return resp
+        
+    except Exception as e:
+        # 화면이 비지 않게, 실패해도 빈 결과를 반환
+        return {"packages": [], "error": str(e)}
+
+@router.get("/method")
+def get_method(nodeId: str):
+    """
+    메서드 본문 펼치기용 엔드포인트
+    
+    Args:
+        nodeId: 메서드 앵커 ID (예: "m:com.example.Parser.List parseTokens(String)")
+        
+    Returns:
+        {
+            "id": str,
+            "file": str,
+            "body": str,
+            "range": {"start": [line, col], "end": [line, col]}
+        }
+    """
+    try:
+        # nodeId 파싱: "m:package.class.method" 형태
+        if not nodeId.startswith("m:"):
+            raise HTTPException(400, "Invalid method nodeId format")
+            
+        method_path = nodeId[2:]  # "m:" 제거
+        
+        # 간단 구현: 현재는 더미 데이터 반환
+        # 실제로는 인덱싱 시 생성한 매핑 테이블에서 파일/라인 정보를 찾아야 함
+        
+        # 워크스페이스에서 실제 메서드 찾기 (간단 버전)
+        workspace = Path(getattr(get_method, '_workspace', Path(os.getcwd()) / "test_workspace"))
+        
+        # 패키지/클래스명에서 파일 경로 추정
+        parts = method_path.split(".")
+        if len(parts) >= 2:
+            # 마지막 부분은 메서드명이므로 제외
+            class_parts = []
+            for i, part in enumerate(parts):
+                if "(" in part:  # 메서드 시그니처 시작
+                    break
+                class_parts.append(part)
+            
+            if len(class_parts) >= 1:
+                class_name = class_parts[-1]
+                package_parts = class_parts[:-1]
+                
+                # 파일 경로 생성
+                file_path = workspace
+                for pkg_part in package_parts:
+                    file_path = file_path / pkg_part
+                file_path = file_path / f"{class_name}.java"
+                
+                if file_path.exists():
+                    try:
+                        content = file_path.read_text(encoding="utf-8", errors="ignore")
+                        
+                        # 간단한 메서드 본문 추출 (정규식 기반)
+                        # 실제로는 인덱싱 시 저장한 range 정보를 사용해야 함
+                        method_name = method_path.split("(")[0].split(".")[-1]
+                        
+                        # 메서드 시그니처 찾기
+                        method_pattern = rf"\b{re.escape(method_name)}\s*\([^{{]*\{{"
+                        match = re.search(method_pattern, content)
+                        
+                        if match:
+                            start_pos = match.start()
+                            # 중괄호 매칭으로 메서드 끝 찾기
+                            brace_start = content.find("{", start_pos)
+                            if brace_start >= 0:
+                                i = brace_start + 1
+                                depth = 1
+                                while i < len(content) and depth > 0:
+                                    if content[i] == "{":
+                                        depth += 1
+                                    elif content[i] == "}":
+                                        depth -= 1
+                                    i += 1
+                                
+                                if depth == 0:
+                                    method_body = content[start_pos:i]
+                                    
+                                    # 라인 번호 계산
+                                    lines_before = content[:start_pos].count("\n")
+                                    lines_in_method = method_body.count("\n")
+                                    
+                                    return {
+                                        "id": nodeId,
+                                        "file": str(file_path.relative_to(workspace)),
+                                        "body": method_body,
+                                        "range": {
+                                            "start": [lines_before, 0],
+                                            "end": [lines_before + lines_in_method, 0]
+                                        }
+                                    }
+                    except Exception as read_error:
+                        pass
+        
+        # 기본 응답 (찾지 못한 경우)
+        return {
+            "id": nodeId,
+            "file": "unknown",
+            "body": f"// Method {nodeId} not found",
+            "range": {"start": [0, 0], "end": [0, 0]}
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/compare")
+def compare(req: CompareReq):
+    """
+    두 상태를 비교하여 변경사항 반환
+    """
+    try:
+        ensure_workspace()
+        f = req.from_ or "working"
+        overlay = compare_states(f, req.to, req.scope)
+        return {"projectId": req.projectId, "overlay": overlay}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/export/snippets")
+def export_snippets(req: SnippetReq):
+    """
+    특정 앵커들에 대한 코드 스니펫 팩 추출
+    
+    Args:
+        req: SnippetReq - projectId, anchors, contextLines, baseline, scope
+        
+    Returns:
+        SnippetPack: {
+            "projectId": str,
+            "baseline": str,
+            "items": [
+                {
+                    "anchor": str,
+                    "file": str, 
+                    "range": {"start": [line, col], "end": [line, col]},
+                    "hash": str,
+                    "text": str
+                }
+            ],
+            "missing": [str]  # 찾지 못한 앵커들
+        }
+    """
+    try:
+        ensure_workspace()
+        pack = build_snippet_pack(
+            project_id=req.projectId,
+            anchors=req.anchors,
+            context_lines=req.contextLines,
+            baseline=req.baseline,
+            scope=req.scope
+        )
+        return pack
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/nodes/{node_id}/apply")
+def apply_patch(node_id: str, req: ApplyReq):
+    """
+    외부 AI가 제안한 unified diff를 안전하게 적용
+    
+    Args:
+        node_id: 노드 ID (향후 확장용)
+        req: ApplyReq - 적용 요청 정보
+        
+    Returns:
+        {
+            "ok": bool,
+            "checkpointId": str,
+            "nodeId": str,
+            "apply": {...} (성공시),
+            "error": str (실패시)
+        }
+    """
+    ensure_workspace()
+    
+    # 1) 자동 체크포인트 생성 (적용 직전)
+    try:
+        ckpt_id = create_checkpoint(
+            project_id=req.projectId, 
+            label=f"auto-before-apply-{node_id}"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create checkpoint: {e}")
+
+    # 2) 가드 검사 + 적용
+    try:
+        result = apply_unified_patch_with_guards(
+            project_id=req.projectId,
+            targets=req.targets,
+            allowed_ops=req.allowedOps,
+            patch=req.patch
+        )
+        
+        # 성공 시 SSE
+        try:
+            import asyncio
+            asyncio.create_task(BUS.publish({
+                "type": "apply_succeeded",
+                "paths": result.get("changedFiles", [])
+            }))
+        except Exception:
+            pass
+        
+        return {
+            "ok": True,
+            "checkpointId": ckpt_id,
+            "nodeId": node_id,
+            "apply": result,
+            "rationale": req.rationale
+        }
+
+    except RegionLockViolationError as e:
+        # ❗중요: 200으로 돌려 ok:false + violations 포함 (프론트가 파싱 용이)
+        payload = {
+            "ok": False, 
+            "error": "region_lock_violation", 
+            "violations": e.violations,
+            "checkpointId": ckpt_id,
+            "nodeId": node_id,
+            "rationale": req.rationale
+        }
+        # 실패 SSE도 함께 (메인 자동 새로고침/토스트)
+        try:
+            import asyncio
+            asyncio.create_task(BUS.publish({
+                "type": "apply_failed",
+                "reason": "region_lock_violation",
+                "violations": e.violations,
+            }))
+        except Exception:
+            pass
+        return payload
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 다른 에러는 400 (프론트가 j.ok 없을 수 있음)
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/diagnose")
+def diagnose(req: DiagnoseReq):
+    """
+    컴파일/테스트 진단 파이프라인 실행
+    
+    Args:
+        req: DiagnoseReq - 진단 요청 정보
+        
+    Returns:
+        {
+            "summary": {"errors": int, "warnings": int},
+            "diagnostics": [
+                {
+                    "kind": "compile" | "test",
+                    "severity": "error" | "warning" | "info",
+                    "message": str,
+                    "file": str,
+                    "range": {"start": [line, col], "end": [line, col]},
+                    "anchor": str (optional)
+                }
+            ]
+        }
+    """
+    try:
+        ensure_workspace()
+        all_diags = []
+
+        if "compile" in req.pipeline:
+            code, out, err = run_javac_compile()
+            comp_diags_basic = parse_javac_output(out, err)
+            comp_diags = map_diags_to_anchors(comp_diags_basic)
+            all_diags.extend(comp_diags)
+
+        if "test" in req.pipeline:
+            r = run_gradle_test_if_available()
+            if r is not None:
+                code, out, err = r
+                test_diags = parse_gradle_test(out, err)
+                all_diags.extend(test_diags)
+            else:
+                # gradle 없으면 스킵(정보 제공)
+                all_diags.append({
+                    "kind":"test","severity":"info",
+                    "message":"Gradle wrapper not found; skipped test pipeline"
+                })
+
+        errors = sum(1 for d in all_diags if d.get("severity") == "error")
+        warnings = sum(1 for d in all_diags if d.get("severity") == "warning")
+
+        return {
+            "summary": {"errors": errors, "warnings": warnings},
+            "diagnostics": all_diags
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/diagnose/simple")
+def run_diagnose_simple(projectId: str = "default", pipeline: List[str] = ["compile"]):
+    """
+    간단한 진단 실행 (새로운 diagnostics_utils 사용)
+    """
+    try:
+        ensure_workspace()
+        # 지금은 compile만
+        res = compile_project()
+        diags = res.get("diagnostics", [])
+        return {
+            "ok": True,
+            "tool": res.get("tool"),
+            "summary": summarize(diags),
+            "diagnostics": diags,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/checkpoints")
+def get_checkpoints(projectId: Optional[str] = None):
+    """
+    체크포인트 목록 조회
+    
+    Args:
+        projectId: 특정 프로젝트의 체크포인트만 필터링 (선택사항)
+        
+    Returns:
+        {"items": [{"id", "projectId", "label", "createdAt", "fileCount"}]}
+    """
+    try:
+        items = list_checkpoints(projectId)
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/checkpoints")
+def post_checkpoint(req: CkptCreateReq):
+    """
+    새 체크포인트 생성
+    
+    Args:
+        req: CkptCreateReq - 체크포인트 생성 요청
+        
+    Returns:
+        {"checkpointId": str}
+    """
+    try:
+        ensure_workspace()
+        cid = create_checkpoint(project_id=req.projectId, label=req.label)
+        return {"checkpointId": cid}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/diff/method")
+def diff_method(projectId: str, baseline: str, anchor: str):
+    """
+    메서드 단위 라인 diff 조회
+    
+    Args:
+        projectId: 프로젝트 ID
+        baseline: 비교 기준점 (체크포인트 ID)
+        anchor: 메서드 앵커 (예: m:com.example.Parser.parseTokens)
+        
+    Returns:
+        {
+            "projectId": str,
+            "anchor": str,
+            "kind": "added" | "modified" | "equal",
+            "oldLoc": int,
+            "newLoc": int,
+            "hunks": [
+                {
+                    "type": "add" | "del" | "mod",
+                    "old": [start_line, end_line],
+                    "new": [start_line, end_line]
+                }
+            ]
+        }
+    """
+    try:
+        ensure_workspace()
+        res = method_line_diff(baseline, anchor)
+        return {"projectId": projectId, **res}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/events")
+async def sse_events(request: Request):
+    """
+    Server-Sent Events 엔드포인트 - 파일 변경 알림
+    """
+    ensure_watcher()  # 워처 시작
+    queue = BUS.subscribe()
+
+    async def event_gen():
+        try:
+            # 연결 직후 클라이언트 준비용 핑
+            yield {
+                "event": "ping", 
+                "data": json.dumps({"ts": time.time(), "status": "connected"})
+            }
+            
+            while True:
+                if await request.is_disconnected():
+                    break
+                    
+                try:
+                    # 25초 타임아웃으로 대기
+                    data = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield {"event": "message", "data": data}
+                except asyncio.TimeoutError:
+                    # keep-alive 핑
+                    yield {
+                        "event": "ping", 
+                        "data": json.dumps({"ts": time.time(), "status": "alive"})
+                    }
+        except Exception as e:
+            print(f"[sse] error in event stream: {e}")
+        finally:
+            BUS.unsubscribe(queue)
+
+    return EventSourceResponse(event_gen())
+
+@router.post("/checkpoints/restore")
+def restore_checkpoint_endpoint(req: RestoreReq):
+    """
+    체크포인트 원복 (미리보기 또는 적용)
+    
+    Args:
+        req: RestoreReq - 원복 요청
+        
+    Returns:
+        dry-run: {"preview": {"forward": {...}, "backward": {...}}}
+        apply: {"ok": bool, "restoredTo": str, "autoBefore": str, "verifyOverlay": {...}}
+    """
+    try:
+        ensure_workspace()
+        
+        mani_path = MANI / f"{req.checkpointId}.json"
+        if not mani_path.exists():
+            raise HTTPException(status_code=404, detail="checkpoint not found")
+        
+        manifest = json.loads(mani_path.read_text(encoding="utf-8"))
+
+        # 미리보기: 현재(working) → 선택한 ckpt 로 갈 때의 변경 요약 제공
+        # - forward: working -> ckpt  (실제로 적용될 변화 관점)
+        # - backward: ckpt -> working (지금 화면 오버레이와 동일 관점)
+        preview_forward = compare_states("working", req.checkpointId)
+        preview_backward = compare_states(req.checkpointId, "working")
+
+        if req.mode == "dry-run":
+            return {"preview": {"forward": preview_forward, "backward": preview_backward}}
+
+        # apply: 적용 직전 자동 스냅샷
+        before_id = create_checkpoint(project_id=req.projectId, label="auto-before-restore")
+        
+        # 실제 복구
+        _restore_apply(manifest)
+        
+        # 복원 후 검증(차이 0 이어야 정상)
+        after_overlay = compare_states(req.checkpointId, "working")  
+
+        return {
+            "ok": True,
+            "restoredTo": req.checkpointId,
+            "autoBefore": before_id,
+            "verifyOverlay": after_overlay
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/layout/graph")
+def layout_graph(
+    projectId: str,
+    level: str = Query("class", pattern="^(class|package)$"),
+    baseline: Optional[str] = None,
+    kinds: str = "extends,implements,calls,references"
+):
+    """
+    그래프 레이아웃 반환 (클래스/패키지 관계 시각화)
+    
+    Args:
+        projectId: 프로젝트 ID
+        level: 그래프 레벨 ("class" | "package")
+        baseline: 비교 기준점 (체크포인트 ID)
+        kinds: 포함할 관계 종류 (extends,implements,calls,references)
+        
+    Returns:
+        {
+            "projectId": str,
+            "view": "graph",
+            "level": str,
+            "nodes": [...],
+            "edges": [...]
+        }
+    """
+    try:
+        ensure_workspace()
+        kindset: Set[str] = {k.strip() for k in kinds.split(",") if k.strip()}
+        print(f"[DEBUG ROUTES] kindset = {kindset}", flush=True)
+        g = build_graph(level=level, baseline=baseline, kinds=kindset)
+        print(f"[DEBUG ROUTES] graph result: {len(g.get('nodes', []))} nodes, {len(g.get('edges', []))} edges", flush=True)
+
+        # Debug info for testing
+        pkg_nodes = [n for n in g.get('nodes', []) if n.get('id', '').startswith('pkg:')]
+
+        return {
+            "projectId": projectId,
+            "view": "graph",
+            "level": g["level"],
+            "nodes": g["nodes"],
+            "edges": g["edges"]
+            # baseline을 넘겨줬다면, 노드의 overlay 필드에 반영되어 있음
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/diff/apply")
+def apply_diff(req: DiffApplyReq):
+    """
+    Apply a unified diff to the working directory
+    
+    Args:
+        req: Request containing projectId and diff content
+        
+    Returns:
+        {
+            "ok": bool,
+            "appliedFiles": [str],
+            "message": str
+        }
+    """
+    try:
+        ensure_workspace()
+        
+        # Apply the unified diff using existing patch utils
+        from pathlib import Path
+        import tempfile
+        
+        # Write diff to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+            f.write(req.diff)
+            patch_file = f.name
+        
+        try:
+            # Apply the patch
+            result = apply_unified_patch_with_guards(patch_file, Path(WORKSPACE))
+            
+            # Clean up temp file
+            os.unlink(patch_file)
+            
+            if result.get("ok"):
+                # Publish update event
+                asyncio.create_task(BUS.publish({
+                    "type": "index_updated",
+                    "paths": result.get("appliedFiles", []),
+                    "reason": "diff_applied"
+                }))
+                
+                return {
+                    "ok": True,
+                    "appliedFiles": result.get("appliedFiles", []),
+                    "message": "Diff applied successfully"
+                }
+            else:
+                raise HTTPException(status_code=400, detail=result.get("error", "Failed to apply diff"))
+                
+        except Exception as e:
+            # Clean up temp file on error
+            if os.path.exists(patch_file):
+                os.unlink(patch_file)
+            raise
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+# ---- AI Job endpoints ----
+from fastapi import Body
+
+@router.post("/ai/jobs")
+def create_ai_job(body: dict = Body(...)):
+    """
+    body: { projectId, anchors[], baseline?, contextLines?, profile? }
+    외부 AI 서버에 작업을 제출하고 jobId 반환
+    """
+    project_id = body.get("projectId", "PRJ")
+    anchors = body.get("anchors") or []
+    baseline = body.get("baseline", "working")
+    ctx = int(body.get("contextLines", 3))
+    if not anchors:
+        raise HTTPException(400, "anchors required")
+
+    # 스니펫팩 (이미 있는 util 재사용)
+    pack = build_snippet_pack(project_id, anchors, ctx, baseline)
+
+    job_id = uuid4().hex
+    with AI_LOCK:
+        AI_JOBS[job_id] = {
+            "id": job_id, "status": "queued", "anchors": anchors,
+            "projectId": project_id, "baseline": baseline,
+            "createdAt": int(time.time())
+        }
+
+    # 외부 AI 서버로 제출 (없으면 스킵)
+    if not EXTERNAL_AI_URL:
+        # 외부 서버가 없다면 데모용으로 곧바로 failed 로 표기
+        with AI_LOCK:
+            AI_JOBS[job_id]["status"] = "failed"
+            AI_JOBS[job_id]["error"] = "EXTERNAL_AI_URL not configured"
+        return {"jobId": job_id, "status": "failed", "error": "external AI not configured"}
+
+    # payload 준비
+    callback_url = f"{PUBLIC_BASE_URL.rstrip('/')}/main/ai/callback"
+    payload = {
+        "jobId": job_id,
+        "anchors": anchors,
+        "baseline": baseline,
+        "rules": ["EDIT_METHOD_BODY","ADD_IMPORT"],
+        "callbackUrl": callback_url,
+        "callbackSecret": AI_CALLBACK_SECRET,
+    }
+    # bundle(zip) 파일 파트
+    import io, zipfile, json
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("prompt.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        for i, it in enumerate(pack["items"], 1):
+            safe = it["anchor"].replace(":","_").replace(" ","_").replace("/","_")
+            z.writestr(f"snippets/{i:02d}_{safe}.java", it["text"])
+    buf.seek(0)
+
+    headers = {"Authorization": f"Bearer {EXTERNAL_AI_KEY}"} if EXTERNAL_AI_KEY else {}
+    files = {"bundle": ("bundle.zip", buf.getvalue(), "application/zip")}
+    try:
+        requests.post(f"{EXTERNAL_AI_URL.rstrip('/')}/jobs",
+                      headers=headers, files=files, data={"jobId": job_id}, timeout=30)
+        with AI_LOCK:
+            AI_JOBS[job_id]["status"] = "running"
+    except Exception as e:
+        with AI_LOCK:
+            AI_JOBS[job_id]["status"] = "failed"
+            AI_JOBS[job_id]["error"]  = f"submit error: {e}"
+
+    return {"jobId": job_id, "status": AI_JOBS[job_id]["status"]}
+
+
+@router.get("/ai/jobs/{job_id}")
+def get_ai_job(job_id: str):
+    """작업 상태 조회"""
+    with AI_LOCK:
+        job = AI_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        # diff는 길 수 있으니 필요 시 앞부분만
+        return job
+
+
+@router.post("/ai/callback")
+async def ai_callback(request: Request):
+    """외부 AI 서버 콜백 엔드포인트"""
+    # 외부 AI 서버가 호출: {jobId, status, diff?, error?}
+    body = await request.json()
+    secret = request.headers.get("X-AI-CALLBACK-TOKEN")
+    if secret != AI_CALLBACK_SECRET:
+        raise HTTPException(401, "invalid callback token")
+
+    job_id = body.get("jobId")
+    if not job_id:
+        raise HTTPException(400, "jobId required")
+
+    with AI_LOCK:
+        job = AI_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        job["status"] = body.get("status", "done")
+        if body.get("diff"):   job["diff"] = body["diff"]
+        if body.get("error"):  job["error"] = body["error"]
+        job["updatedAt"] = int(time.time())
+
+    return {"ok": True}

@@ -1,0 +1,27 @@
+# Workspace Export
+
+
+---
+
+## CLAUDE.md
+
+# Claude Code Instructions
+
+## Task Master AI Instructions
+**Import Task Master's development workflow commands and guidelines, treat as if import is in the main CLAUDE.md file.**
+@./.taskmaster/CLAUDE.md
+
+
+
+---
+
+## file1.md
+
+This is file 1.
+
+
+---
+
+## file2.md
+
+This is file 2 with a secret: sk-123**********def.

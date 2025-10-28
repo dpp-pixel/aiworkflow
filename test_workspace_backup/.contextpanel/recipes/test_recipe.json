@@ -1,0 +1,13 @@
+{
+  "name": "test_recipe",
+  "created_at": 1755929530.668064,
+  "primary_paths": [
+    "C:\\Users\\82104\\my_project\\test_workspace\\file1.md",
+    "C:\\Users\\82104\\my_project\\test_workspace\\file2.md"
+  ],
+  "reference_paths": [
+    "C:\\Users\\82104\\my_project\\test_workspace\\CLAUDE.md"
+  ],
+  "exclude_hashes": [],
+  "mask": true
+}

@@ -1,0 +1,11 @@
+{
+  "projectId": "test",
+  "targets": ["m:com.example.Parser.public String getContent()"],
+  "allowedOps": ["EDIT_METHOD_BODY"],
+  "patch": {
+    "format": "unified",
+    "file": "com/example/Parser.java",
+    "diff": "--- a/com/example/Parser.java\n+++ b/com/example/Parser.java\n@@ -24,2 +24,3 @@\n         if (content == null) {\n+            // AI가 추가한 주석\n             return \"\";\n         }"
+  },
+  "rationale": "Add AI-generated comment for clarity"
+}

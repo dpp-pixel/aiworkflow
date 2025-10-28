@@ -1,0 +1,19 @@
+## [primary] file1.md > Introduction
+
+
+
+---
+## [primary] file2.md > Introduction
+
+
+
+---
+## [reference] CLAUDE.md > Claude Code Instructions
+
+
+
+---
+## [reference] CLAUDE.md > Task Master AI Instructions
+
+**Import Task Master's development workflow commands and guidelines, treat as if import is in the main CLAUDE.md file.**
+@./.taskmaster/CLAUDE.md

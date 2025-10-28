@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>맥락 패널</title>
+    <style>
+        body { font-family: sans-serif; background-color: #0B0F12; color: #E6EDF3; margin: 2em; min-height: 0; }
+        .box { background-color: #0F141A; border: 1px solid #30363d; border-radius: 6px; padding: 1em; margin-bottom: 1em; min-height: 0; }
+
+        /* 스크롤바 스타일링 */
+        ::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+          background: #0F141A;
+          border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb {
+          background: #30363d;
+          border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+          background: #484f58;
+        }
+        /* Firefox 스크롤바 */
+        * {
+          scrollbar-width: thin;
+          scrollbar-color: #30363d #0F141A;
+        }
+        button { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
+        button:hover { background-color: #30363d; }
+        .mono { font-family: monospace; white-space: pre; background-color: #010409; padding: 1em; border-radius: 6px; }
+        ul { list-style-type: none; padding-left: 0; }
+        li { padding: 4px; border-radius: 4px; }
+        li:hover { background-color: #30363d; }
+        .chip { display: inline-block; background: #21262d; padding: 4px 8px; margin: 2px; border-radius: 12px; font-size: 0.85em; }
+        .chip button { padding: 2px 6px; margin-left: 4px; font-size: 0.8em; }
+    </style>
+</head>
+<body>
+    <h1>맥락 패널 컨트롤</h1>
+    
+    <!-- 워크스페이스 설정 (상단 공통) -->
+    <div class="box">
+      <h2>워크스페이스</h2>
+      <button onclick="selectWs()">폴더 선택</button>
+      <button onclick="scanWs()">스캔</button>
+      <div class="mono" id="wsStatus"></div>
+    </div>
+
+    <!-- 7:3 그리드 뼈대 -->
+    <div id="app" style="display:grid;grid-template-columns:7fr 3fr;gap:16px;align-items:start;min-height:100vh;">
+      <div id="leftCol" style="display:flex;flex-direction:column;gap:16px;min-height:0;">
+        
+        <!-- CONTEXT PANEL (새 레이아웃) -->
+        <div id="contextPanel" class="box"
+             style="position:relative; display:grid; grid-template-columns: 1fr auto; gap:12px; min-height:220px;">
+          <!-- React Context 마운트 영역 -->
+          <div id="contextReactRoot" style="display:flex; flex-direction:column; width: 100%;">
+            <!-- React ContextPanel이 여기에 마운트됩니다 -->
+          </div>
+
+          <!-- 기존 Vanilla JS 영역 (점진 제거 예정) -->
+          <div id="contextVanilla" style="display:none; flex-direction:column;">
+            <textarea id="ctxText" rows="6"
+              style="width:100%; background:#010409; color:#E6EDF3; border:1px solid #30363d; border-radius:6px;"
+              placeholder="여기에 상황/목표/제약 등 자유 텍스트를 적어두세요. (AI는 아래 첨부 MD 원문을 우선으로 읽습니다)">
+            </textarea>
+
+            <!-- 칩(선택한 MD) -->
+            <div style="margin-top:8px;">
+              <div style="font-size:12px; opacity:.75; margin-bottom:4px;">연결된 MD</div>
+              <div id="chipsP" class="chiprow" style="margin-bottom:4px;"></div>
+              <div id="chipsR" class="chiprow"></div>
+            </div>
+          </div>
+
+          <!-- 오른쪽: 세로 버튼 = 자세히 보기 -->
+          <button onclick="toggleCtxDetail(true)"
+            style="writing-mode:vertical-rl; transform:rotate(180deg); height:100%;
+                   padding:10px 8px; border-radius:8px;">자세히 보기</button>
+        </div>
+
+        <!-- 좌측 하단: 메인 패널 (React MainPanel이 여기 렌더됨) -->
+        <div id="mainPanel" class="box" style="min-height:50vh;display:flex;flex-direction:column;">
+          <!-- React MainPanel 컴포넌트가 여기에 렌더됩니다 -->
+        </div>
+
+        <!-- 스냅샷(복구) & Export -->
+        <div id="snapshotBox" class="box">
+          <h2>스냅샷(복구) & Export</h2>
+          
+          <!-- 스냅샷(복구) -->
+          <h3>스냅샷(복구)</h3>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+            <button onclick="createCheckpoint()">체크포인트 생성</button>
+            <button onclick="loadHistory()">목록 새로고침</button>
+          </div>
+          <div id="historyList"></div>
+          <pre class="mono" id="diffBox" style="max-height:150px; overflow:auto;"></pre>
+          
+          <!-- Export -->
+          <h4 style="margin-top:12px;">Export</h4>
+          <label><input type="checkbox" id="maskSecrets" checked> 시크릿 마스킹</label>
+          <button onclick="exportReport()">MD Export</button>
+          <div class="mono" id="exportStatus" style="max-height:80px; overflow:auto;"></div>
+        </div>
+
+      </div>
+
+      <!-- 우측: 로그 패널 -->
+      <div id="rightCol" style="display:flex;flex-direction:column;gap:16px;">
+        <div id="logPanel" class="box">
+          <h2>LOG PANEL</h2>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label>Branch <input id="logBranch" value="main" style="width:120px;"></label>
+            <button onclick="loadLogs()">새로고침</button>
+          </div>
+          <div id="logList" style="max-height:60vh;overflow:auto;margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- API 서버 주소 설정 -->
+    <script>
+      window.__API_BASE__ = "http://127.0.0.1:8001";
+      window.__EXTERNAL_AI__ = true;  // 자동 탭 활성화
+    </script>
+
+    <!-- UI 선택 플래그 -->
+    <script>
+      window.__USE_NEW_UI__ = true; // 기존 UI만 볼 때 false, React UI 쓸 때 true
+      window.__SPLIT_CONTEXT__ = true; // Main/Context를 분리 렌더
+    </script>
+    
+    <!-- === TEMP PATCH: /main/layout/basic 422 회피용 fetch 인터셉트 === -->
+    <script>
+      (function () {
+        if (window.__USE_NEW_UI__) return; // ← React 모드면 fetch 패치 비활성화
+        const realFetch = window.fetch.bind(window);
+        window.fetch = async (input, init = {}) => {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          // 초기화 단계에서 GET /main/layout/basic이 422면 UI가 내려가므로, 여기서 200을 보장
+          if (typeof url === 'string' && url.includes('/main/layout/basic')) {
+            // 1) 먼저 POST로 재시도
+            try {
+              const resp = await realFetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ baseline: 'working' })
+              });
+              if (resp && resp.ok) return resp;
+            } catch (e) { /* 무시하고 2)로 진행 */ }
+
+            // 2) 실패하면 최소 스키마의 가짜 성공 응답 반환 (React 초기 마운트 유지)
+            const mock = { layout: 'basic', cfg: {}, packages: [] };
+            return new Response(JSON.stringify(mock), {
+              status: 200, headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          return realFetch(input, init);
+        };
+      })();
+    </script>
+
+    <script>
+      // TEMP: 누락된 하이라이트 객체로 인한 ReferenceError 방지
+      // (모듈에서 자유변수로 참조해도 안전하도록 var 로 글로벌 바인딩 생성)
+      var methodHighlights = window.methodHighlights || {};
+      var classHighlights = window.classHighlights || {};
+    </script>
+
+    <!-- React MainPanel 번들 (조건부 로드 + 경로 폴백) -->
+    <script type="module">
+      if (window.__USE_NEW_UI__) {
+        const tryImport = async (p) => import(p).then(m => true).catch(/* @vite-ignore */ () => false);
+
+        // 1) Main 엔트리: #mainPanel
+        let okMain = await tryImport(/* @vite-ignore */ '/src/main.jsx');
+        if (!okMain) okMain = await tryImport(/* @vite-ignore */ './src/main.jsx');
+        if (!okMain) okMain = await tryImport(/* @vite-ignore */ 'src/main.jsx');
+        if (!okMain) console.error('React main.jsx를 찾을 수 없습니다. 정적 경로를 확인하세요.');
+
+        // 2) Context 엔트리: #contextReactRoot (분리 모드일 때만)
+        if (window.__SPLIT_CONTEXT__) {
+          let okCtx = await tryImport(/* @vite-ignore */ '/src/context.jsx');
+          if (!okCtx) okCtx = await tryImport(/* @vite-ignore */ './src/context.jsx');
+          if (!okCtx) okCtx = await tryImport(/* @vite-ignore */ 'src/context.jsx');
+          if (!okCtx) console.error('React context.jsx를 찾을 수 없습니다. 정적 경로를 확인하세요.');
+        }
+      }
+    </script>
+
+    <!-- Debug HUD for API health check -->
+    <style>
+      #debugHud{position:fixed;top:6px;left:6px;z-index:99999;background:#111827;color:#e5e7eb;padding:4px 8px;border:1px solid #374151;border-radius:6px;font:12px ui-monospace,monospace;max-width:300px;word-break:break-all}
+      /* 임시 차단 - 레거시 컨테이너(#app) 내부만 숨기기 */
+      #app #main, #app #main-panel, #app .main-panel-vanilla { display:none !important; }
+    </style>
+    <div id="debugHud">init…</div>
+    <script>
+    (async ()=>{
+      const hud=document.getElementById('debugHud');
+      try{
+        const base=window.__API_BASE__||'';
+        hud.textContent = `API Base: ${base || '(empty)'}`;
+        const r=await fetch(base+'/main/layout/basic?baseline=working');
+        hud.textContent=`/main/layout/basic → ${r.status}`;
+        if (r.ok) {
+          const data = await r.json();
+          const pkgCount = data?.packages?.length || 0;
+          hud.textContent=`API OK: ${pkgCount} packages`;
+          // 3초 후 HUD 숨기기 (성공 시)
+          setTimeout(() => { hud.style.opacity = '0.3'; }, 3000);
+        }
+      }catch(e){
+        hud.textContent='fetch error: '+(e&&e.message||e);
+        hud.style.color='#f87171'; // 에러 시 빨간색
+      }
+    })();
+    
+    // 오버레이 탐지 스크립트 (개발용)
+    setTimeout(() => {
+      console.log('=== Overlay Detection ===');
+      console.log('MainPanel count:', [...document.querySelectorAll('[data-component="MainPanel"]')].length);
+      
+      const x=innerWidth/2, y=innerHeight/2;
+      let el=document.elementFromPoint(x,y);
+      console.log("Element at screen center:", el);
+      for (let i=0;i<8 && el; i++, el=el.parentElement) {
+        const s=getComputedStyle(el);
+        console.log(i, el.tagName, el.id, el.className, 'pos:'+s.position, 'z:'+s.zIndex, 'pe:'+s.pointerEvents, 'op:'+s.opacity);
+      }
+    }, 1000);
+    </script>
+
+    <!-- 기존 vanilla JS 로직 (맥락 패널 등) -->
+    <script>
+    // 기존 vanilla JS 함수들 (간소화 버전)
+    async function selectWs(){
+      document.getElementById('wsStatus').textContent = 'Workspace selection...';
+      // pywebview 호출 등 기존 로직
+    }
+
+    async function scanWs(){
+      document.getElementById('wsStatus').textContent = 'Scanning workspace...';
+      // 워크스페이스 스캔 로직
+    }
+
+    function toggleCtxDetail(open){
+      // 맥락 패널 자세히 보기 토글
+      console.log('Toggle context detail:', open);
+    }
+
+    async function createCheckpoint(){
+      // 체크포인트 생성
+      console.log('Create checkpoint');
+    }
+
+    async function loadHistory(){
+      // 히스토리 로드
+      console.log('Load history');
+    }
+
+    async function exportReport(){
+      // Export 리포트
+      console.log('Export report');
+    }
+
+    async function loadLogs(){
+      // 로그 로드
+      console.log('Load logs');
+    }
+    </script>
+</body>
+</html>

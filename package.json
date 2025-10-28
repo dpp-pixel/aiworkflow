@@ -1,0 +1,23 @@
+{
+  "name": "my_project",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "react": "18.2",
+    "react-dom": "18.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.23",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react-swc": "^4.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

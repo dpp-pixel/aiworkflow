@@ -1,0 +1,90 @@
+{
+  "id": "ckpt_20250818_170822_02db",
+  "projectId": "test",
+  "label": "auto-before-apply-test_node",
+  "createdAt": "2025-08-18T17:08:22Z",
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "sha": "06c872aba297270f524a42294be2d29b8f49a38d",
+      "size": 210,
+      "mtime": 1755413923.3635345
+    },
+    {
+      "path": "file1.md",
+      "sha": "54d1baa10332905f39dfc12c8386cf035b1f4da6",
+      "size": 15,
+      "mtime": 1755218865.471507
+    },
+    {
+      "path": "file2.md",
+      "sha": "2b0fbe66066498c481b6b796cb9576c70d4ca55a",
+      "size": 50,
+      "mtime": 1755218865.487477
+    },
+    {
+      "path": "Main.java",
+      "sha": "edee63fb87c82586ebb7661ebd29f3ff369effb1",
+      "size": 250,
+      "mtime": 1755494937.206171
+    },
+    {
+      "path": ".contextpanel/context.db",
+      "sha": "90f8ab4d62dc22bd8f2831fa32ed87cbdbd36573",
+      "size": 28672,
+      "mtime": 1755413923.3781452
+    },
+    {
+      "path": ".contextpanel/.contextpanel/context.db",
+      "sha": "4bf14b038d77f2305c5a58582dd2165a49728ca6",
+      "size": 20480,
+      "mtime": 1755223481.7969363
+    },
+    {
+      "path": ".contextpanel/exports/report-20250815-110502.md",
+      "sha": "42f340a080d1e00d77ea7cbffd85d2e586ad6059",
+      "size": 141,
+      "mtime": 1755223502.3360977
+    },
+    {
+      "path": ".contextpanel/exports/report-20250815-110504.md",
+      "sha": "42f340a080d1e00d77ea7cbffd85d2e586ad6059",
+      "size": 141,
+      "mtime": 1755223504.6760213
+    },
+    {
+      "path": ".contextpanel/exports/report-20250815-134908.md",
+      "sha": "0cf4d827a2cf07fc7624a462e65e970c4c197e21",
+      "size": 141,
+      "mtime": 1755233348.9005945
+    },
+    {
+      "path": ".contextpanel/exports/report-20250815-155308.md",
+      "sha": "0cf4d827a2cf07fc7624a462e65e970c4c197e21",
+      "size": 141,
+      "mtime": 1755240788.779902
+    },
+    {
+      "path": ".contextpanel/exports/report-20250817-160231.md",
+      "sha": "de159d541371b2279224b9572031663dd579cd3f",
+      "size": 380,
+      "mtime": 1755414151.171731
+    },
+    {
+      "path": "com/example/Parser.java",
+      "sha": "21186fd554690ba824978ed3bf24b9abdf535383",
+      "size": 2087,
+      "mtime": 1755495551.944349
+    },
+    {
+      "path": "com/example/util/StringUtils.java",
+      "sha": "c4de52ec991b9603108008dc8d611e0bc296bb51",
+      "size": 1402,
+      "mtime": 1755494930.9152515
+    }
+  ],
+  "stats": {
+    "totalFiles": 13,
+    "totalSize": 54110
+  }
+}

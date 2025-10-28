@@ -1,0 +1,8 @@
+KMDB(포스터)
+키 : G8189LMGS734648S7BN3
+주소 : http://api.koreafilm.or.kr/openapi-data2/wisenut/search_api/search_json2.jsp?collection=kmdb_new2&movieId=(값)
+출력 : posterUrl (이미지 url 나옴)
+
+영진위
+사용법 : https://www.kobis.or.kr/kobisopenapi/homepg/apiservice/searchServiceInfo.do
+키 : 041284459e696ebb9079338cd8731f74
