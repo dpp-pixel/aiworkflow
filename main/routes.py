@@ -847,3 +847,98 @@ async def ai_callback(request: Request):
         job["updatedAt"] = int(time.time())
 
     return {"ok": True}
+
+
+# ---- 내부 AI 분석 (Ollama) ----
+from .analyze_runner import run_ollama_analyze, analyze_class
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from logs.utils import log_ai_analysis
+
+class AnalyzeReq(BaseModel):
+    code: str
+    method_name: Optional[str] = None
+    model: str = "qwen2.5-coder:7b"
+
+@router.post("/ai/analyze")
+async def analyze_method(req: AnalyzeReq):
+    """
+    내부 AI를 사용한 메서드 분석
+
+    Args:
+        req: {
+            "code": "Java 코드",
+            "method_name": "메서드명 (선택)",
+            "model": "모델명 (기본: qwen2.5-coder:7b)"
+        }
+
+    Returns:
+        {
+            "ok": bool,
+            "data": {
+                "method_name": str,
+                "purpose": str,
+                "complexity": int,
+                "externals": [str]
+            },
+            "duration": float,
+            "log_id": int
+        }
+    """
+    try:
+        # Ollama로 분석 실행
+        result = run_ollama_analyze(req.code, model=req.model)
+
+        # 로그에 저장
+        method_name = req.method_name or result.get("data", {}).get("method_name", "unknown")
+        log_id = log_ai_analysis(
+            method_name=method_name,
+            result=result,
+            code_snippet=req.code
+        )
+
+        # 결과 반환
+        if result["ok"]:
+            return {
+                "ok": True,
+                "data": result["data"],
+                "duration": result["duration"],
+                "model": result.get("model"),
+                "log_id": log_id
+            }
+        else:
+            return {
+                "ok": False,
+                "error": result.get("error"),
+                "duration": result.get("duration"),
+                "log_id": log_id
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ai/analyze-class")
+async def analyze_class_endpoint(req: AnalyzeReq):
+    """
+    클래스 전체 분석
+    """
+    try:
+        result = analyze_class(req.code, model=req.model)
+
+        if result["ok"]:
+            return {
+                "ok": True,
+                "data": result["data"],
+                "duration": result["duration"],
+                "model": result.get("model")
+            }
+        else:
+            return {
+                "ok": False,
+                "error": result.get("error"),
+                "duration": result.get("duration")
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
