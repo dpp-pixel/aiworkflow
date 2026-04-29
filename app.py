@@ -158,7 +158,7 @@ else:
     @app.get("/ui/{path:path}")
     def dev_frontend(path: str = ""):
         from starlette.responses import RedirectResponse
-        return RedirectResponse(url=f"http://localhost:3000/{path}")
+        return RedirectResponse(url=f"http://localhost:5173/{path}")
 
 # Include routers
 app.include_router(context_router, prefix="/context", tags=["context"])
@@ -172,6 +172,20 @@ def root():
 
 app.state.workspace = None
 app.state.db_path = None
+
+@app.on_event("startup")
+async def restore_last_workspace():
+    """서버 재시작 시 마지막 워크스페이스 자동 복원"""
+    cfg = load_cfg()
+    last = cfg.get("last_workspace")
+    if last and os.path.isdir(last):
+        app.state.workspace = last
+        app.state.db_path = os.path.join(last, ".contextpanel", "context.db")
+        if cfg.get("persist_mcp_key") and cfg.get("api_key"):
+            app.state.api_key = cfg["api_key"]
+        else:
+            app.state.api_key = secrets.token_urlsafe(24)
+        init_db(app.state.db_path)
 
 def init_db(db_path: str):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
