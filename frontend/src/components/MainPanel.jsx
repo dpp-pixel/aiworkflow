@@ -149,6 +149,88 @@ function ClassCard({
   );
 }
 
+// ---------- Java Syntax Highlighter ----------
+const JAVA_KEYWORDS = new Set([
+  'abstract','assert','boolean','break','byte','case','catch','char','class',
+  'const','continue','default','do','double','else','enum','extends','final',
+  'finally','float','for','goto','if','implements','import','instanceof','int',
+  'interface','long','native','new','package','private','protected','public',
+  'return','short','static','strictfp','super','switch','synchronized','this',
+  'throw','throws','transient','try','void','volatile','while','var','record',
+  'sealed','permits','yield','true','false','null',
+]);
+
+function highlightJava(line) {
+  // 토큰 타입별 색상
+  const C = {
+    kw:      '#ff7b72', // 키워드 - 빨강계
+    str:     '#a5d6ff', // 문자열/문자 - 하늘
+    comment: '#8b949e', // 주석 - 회색
+    num:     '#79c0ff', // 숫자 - 파랑
+    type:    '#ffa657', // 타입(대문자 시작) - 주황
+    annot:   '#d2a8ff', // 어노테이션 - 보라
+    plain:   '#c9d1d9', // 기본 - 흰회색
+  };
+
+  const tokens = [];
+  let i = 0;
+  const s = line;
+
+  while (i < s.length) {
+    // 1) 주석 //
+    if (s[i] === '/' && s[i+1] === '/') {
+      tokens.push({ t: 'comment', v: s.slice(i) });
+      break;
+    }
+    // 2) 문자열 "..."
+    if (s[i] === '"') {
+      let j = i + 1;
+      while (j < s.length && !(s[j] === '"' && s[j-1] !== '\\')) j++;
+      tokens.push({ t: 'str', v: s.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    // 3) 문자 '.'
+    if (s[i] === "'") {
+      let j = i + 1;
+      while (j < s.length && !(s[j] === "'" && s[j-1] !== '\\')) j++;
+      tokens.push({ t: 'str', v: s.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    // 4) 어노테이션 @Xxx
+    if (s[i] === '@') {
+      const m = s.slice(i).match(/^@[A-Za-z_][$\w]*/);
+      if (m) { tokens.push({ t: 'annot', v: m[0] }); i += m[0].length; continue; }
+    }
+    // 5) 숫자
+    if (/[0-9]/.test(s[i]) || (s[i] === '.' && /[0-9]/.test(s[i+1] || ''))) {
+      const m = s.slice(i).match(/^[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?[fFdDlL]?|^0[xX][0-9a-fA-F]+/);
+      if (m) { tokens.push({ t: 'num', v: m[0] }); i += m[0].length; continue; }
+    }
+    // 6) 식별자 (키워드 or 타입 or 일반)
+    if (/[A-Za-z_$]/.test(s[i])) {
+      const m = s.slice(i).match(/^[A-Za-z_$][$\w]*/);
+      if (m) {
+        const w = m[0];
+        const t = JAVA_KEYWORDS.has(w) ? 'kw'
+          : /^[A-Z]/.test(w) ? 'type'
+          : 'plain';
+        tokens.push({ t, v: w });
+        i += w.length;
+        continue;
+      }
+    }
+    // 7) 그 외 (연산자, 괄호 등)
+    tokens.push({ t: 'plain', v: s[i] });
+    i++;
+  }
+
+  return tokens.map((tok, idx) => (
+    <span key={idx} style={{ color: C[tok.t] }}>{tok.v}</span>
+  ));
+}
+
 function MethodRow({
   m, overlay, onExpand, expanded, highlightLine, onAi, diffHunks, editMode, highlight,
   multi = false, selected = false, onToggleSelect = () => {}
@@ -271,12 +353,24 @@ function MethodRow({
       </div>
       {expanded && (
         <div className="relative" style={{ marginTop: '0.75rem' }}>
+          {/* 코드뷰 상단 툴바 */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px', backgroundColor: '#161b22', borderRadius: '8px 8px 0 0', border: '1px solid #21262d', borderBottom: 'none' }}>
+            <span style={{ fontSize: '11px', color: '#6e7681', fontFamily: 'ui-monospace, monospace' }}>
+              {m.sig}
+            </span>
+            <button
+              onClick={() => navigator.clipboard?.writeText(expanded.body ?? '')}
+              style={{ background: 'none', border: '1px solid #30363d', borderRadius: '4px', color: '#8b949e', cursor: 'pointer', fontSize: '11px', padding: '2px 8px' }}
+              onMouseOver={(e) => e.currentTarget.style.color = '#c9d1d9'}
+              onMouseOut={(e) => e.currentTarget.style.color = '#8b949e'}
+            >복사</button>
+          </div>
           <div
             style={{
               maxHeight: '400px',
               overflowY: 'auto',
               overflowX: 'auto',
-              borderRadius: '8px',
+              borderRadius: '0 0 8px 8px',
               backgroundColor: '#0d1117',
               border: '1px solid #21262d',
               padding: '1rem',
@@ -363,11 +457,8 @@ function MethodRow({
                     }}>
                       {lineNum.toString().padStart(3, " ")}
                     </span>
-                    <span style={{
-                      flex: 1,
-                      color: '#c9d1d9'
-                    }}>
-                      {line || "\u00A0"}
+                    <span style={{ flex: 1 }}>
+                      {line ? highlightJava(line) : "\u00A0"}
                     </span>
                   </div>
                 );
