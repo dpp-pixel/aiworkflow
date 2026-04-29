@@ -92,12 +92,11 @@ def _find_methods(text: str, start: int, end: int) -> List[Tuple[str, Tuple[int,
             
         body_end = i  # } 다음 위치
         
-        # 라인/컬럼 계산
-        pre_text = segment[:body_start]
+        # 라인/컬럼 계산 — 시그니처 시작(어노테이션 포함)부터 저장
+        sig_pre_text = segment[:match.start()]
+        start_line = sig_pre_text.count("\n")
+        start_col = len(sig_pre_text.split("\n")[-1])
         body_text = segment[body_start:body_end]
-        
-        start_line = pre_text.count("\n")
-        start_col = len(pre_text.split("\n")[-1])
         
         end_line = start_line + body_text.count("\n")
         end_col = len(body_text.split("\n")[-1])

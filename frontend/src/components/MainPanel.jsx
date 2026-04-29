@@ -409,6 +409,10 @@ export default function MainPanel({
   const [focusReq, setFocusReq] = useState(null);
   const [methodHighlights, setMethodHighlights] = useState({});
   const [violations, setViolations] = useState(null);
+  const [collapsedPkgs, setCollapsedPkgs] = useState(new Set());
+  const [collapsedCls, setCollapsedCls] = useState(new Set());
+  const togglePkg = (name) => setCollapsedPkgs(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
+  const toggleCls = (name) => setCollapsedCls(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
 
   // Selection mode state - renamed to multi
   const [multi, setMulti] = useState(false);

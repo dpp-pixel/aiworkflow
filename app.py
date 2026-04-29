@@ -308,6 +308,31 @@ def update_settings(body: SettingsUpdate):
     save_cfg(cfg)
     return {"ok": True, "settings": cfg}
 
+@app.get("/workspace/browse")
+def browse_directory(path: str = ""):
+    if not path:
+        path = os.path.expanduser("~")
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise HTTPException(400, "Not a directory")
+
+    items = []
+    try:
+        for entry in sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower())):
+            if entry.is_dir() and not entry.name.startswith('.'):
+                items.append({"name": entry.name, "path": entry.path})
+    except PermissionError:
+        pass
+
+    p = Path(path)
+    parent = str(p.parent) if p != p.parent else None
+    # Windows 드라이브 루트일 때 drives 목록 제공
+    drives = []
+    if parent is None:
+        import string
+        drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+    return {"path": path, "parent": parent, "items": items, "drives": drives}
+
 @app.post("/workspace/set")
 def set_workspace(req: WorkspaceReq):
     if not os.path.isdir(req.path):

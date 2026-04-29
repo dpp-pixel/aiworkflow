@@ -135,6 +135,7 @@ async def layout_basic(
 
         workspace = Path(workspace_path)
         data = index_workspace(workspace)
+        request.app.state.last_index = data  # 메서드 본문 조회용 캐시
         
         # maxMethodLines 기준으로 collapsed 플래그 조정
         for pkg in data["packages"]:
@@ -165,109 +166,51 @@ async def layout_basic(
         return {"packages": [], "error": str(e)}
 
 @router.get("/method")
-def get_method(nodeId: str):
-    """
-    메서드 본문 펼치기용 엔드포인트
-    
-    Args:
-        nodeId: 메서드 앵커 ID (예: "m:com.example.Parser.List parseTokens(String)")
-        
-    Returns:
-        {
-            "id": str,
-            "file": str,
-            "body": str,
-            "range": {"start": [line, col], "end": [line, col]}
-        }
-    """
-    try:
-        # nodeId 파싱: "m:package.class.method" 형태
-        if not nodeId.startswith("m:"):
-            raise HTTPException(400, "Invalid method nodeId format")
-            
-        method_path = nodeId[2:]  # "m:" 제거
-        
-        # 간단 구현: 현재는 더미 데이터 반환
-        # 실제로는 인덱싱 시 생성한 매핑 테이블에서 파일/라인 정보를 찾아야 함
-        
-        # 워크스페이스에서 실제 메서드 찾기 (간단 버전)
-        workspace = Path(getattr(get_method, '_workspace', Path(os.getcwd()) / "test_workspace"))
-        
-        # 패키지/클래스명에서 파일 경로 추정
-        parts = method_path.split(".")
-        if len(parts) >= 2:
-            # 마지막 부분은 메서드명이므로 제외
-            class_parts = []
-            for i, part in enumerate(parts):
-                if "(" in part:  # 메서드 시그니처 시작
+def get_method(nodeId: str, request: Request):
+    if not nodeId.startswith("m:"):
+        raise HTTPException(400, "Invalid method nodeId format")
+
+    workspace_path = ensure_workspace()
+    if not workspace_path:
+        raise HTTPException(400, "Workspace not set")
+    workspace = Path(workspace_path)
+
+    # 캐시된 인덱스에서 먼저 탐색, 없으면 즉시 빌드
+    index = getattr(request.app.state, 'last_index', None)
+    if index is None:
+        index = index_workspace(workspace)
+        request.app.state.last_index = index
+
+    for pkg in index.get('packages', []):
+        for cls in pkg.get('classes', []):
+            for method in cls.get('methods', []):
+                if method.get('id') != nodeId:
+                    continue
+                file_rel = cls.get('file', '')
+                range_info = method.get('range', {})
+                if not file_rel or not range_info:
                     break
-                class_parts.append(part)
-            
-            if len(class_parts) >= 1:
-                class_name = class_parts[-1]
-                package_parts = class_parts[:-1]
-                
-                # 파일 경로 생성
-                file_path = workspace
-                for pkg_part in package_parts:
-                    file_path = file_path / pkg_part
-                file_path = file_path / f"{class_name}.java"
-                
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="ignore")
-                        
-                        # 간단한 메서드 본문 추출 (정규식 기반)
-                        # 실제로는 인덱싱 시 저장한 range 정보를 사용해야 함
-                        method_name = method_path.split("(")[0].split(".")[-1]
-                        
-                        # 메서드 시그니처 찾기
-                        method_pattern = rf"\b{re.escape(method_name)}\s*\([^{{]*\{{"
-                        match = re.search(method_pattern, content)
-                        
-                        if match:
-                            start_pos = match.start()
-                            # 중괄호 매칭으로 메서드 끝 찾기
-                            brace_start = content.find("{", start_pos)
-                            if brace_start >= 0:
-                                i = brace_start + 1
-                                depth = 1
-                                while i < len(content) and depth > 0:
-                                    if content[i] == "{":
-                                        depth += 1
-                                    elif content[i] == "}":
-                                        depth -= 1
-                                    i += 1
-                                
-                                if depth == 0:
-                                    method_body = content[start_pos:i]
-                                    
-                                    # 라인 번호 계산
-                                    lines_before = content[:start_pos].count("\n")
-                                    lines_in_method = method_body.count("\n")
-                                    
-                                    return {
-                                        "id": nodeId,
-                                        "file": str(file_path.relative_to(workspace)),
-                                        "body": method_body,
-                                        "range": {
-                                            "start": [lines_before, 0],
-                                            "end": [lines_before + lines_in_method, 0]
-                                        }
-                                    }
-                    except Exception as read_error:
-                        pass
-        
-        # 기본 응답 (찾지 못한 경우)
-        return {
-            "id": nodeId,
-            "file": "unknown",
-            "body": f"// Method {nodeId} not found",
-            "range": {"start": [0, 0], "end": [0, 0]}
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+                file_abs = workspace / file_rel
+                try:
+                    lines = file_abs.read_text(encoding="utf-8", errors="ignore").split("\n")
+                    sl = range_info["start"][0]
+                    el = range_info["end"][0]
+                    body = "\n".join(lines[sl : el + 1])
+                    return {
+                        "id": nodeId,
+                        "file": file_rel,
+                        "body": body,
+                        "range": range_info,
+                    }
+                except Exception as e:
+                    return {"id": nodeId, "file": file_rel, "body": f"// 파일 읽기 실패: {e}", "range": range_info}
+
+    return {
+        "id": nodeId,
+        "file": "unknown",
+        "body": f"// {nodeId} 를 인덱스에서 찾지 못했습니다.\n// 새로고침 버튼을 눌러 인덱스를 다시 빌드하세요.",
+        "range": {"start": [0, 0], "end": [0, 0]},
+    }
 
 @router.post("/compare")
 def compare(req: CompareReq):
