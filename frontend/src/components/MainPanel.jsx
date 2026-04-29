@@ -153,13 +153,14 @@ function MethodRow({
   m, overlay, onExpand, expanded, highlightLine, onAi, diffHunks, editMode, highlight,
   multi = false, selected = false, onToggleSelect = () => {}
 }) {
-  const badgeColor = overlay === OverlayChangeKind.ADDED
-    ? "#10b981"
-    : overlay === OverlayChangeKind.MODIFIED
-    ? "#f59e0b"
-    : overlay === OverlayChangeKind.REMOVED
-    ? "#6b7280"
-    : "#30363d";
+  const visibilityColor = m.visibility === 'public'    ? '#10b981'
+    : m.visibility === 'protected' ? '#f59e0b'
+    : m.visibility === 'private'   ? '#6b7280'
+    : '#60a5fa'; // package-private
+  const badgeColor = overlay === OverlayChangeKind.ADDED    ? "#10b981"
+    : overlay === OverlayChangeKind.MODIFIED ? "#f59e0b"
+    : overlay === OverlayChangeKind.REMOVED  ? "#6b7280"
+    : visibilityColor;
   const removed = overlay === OverlayChangeKind.REMOVED;
 
   return (
@@ -411,6 +412,7 @@ export default function MainPanel({
   const [violations, setViolations] = useState(null);
   const [collapsedPkgs, setCollapsedPkgs] = useState(new Set());
   const [collapsedCls, setCollapsedCls] = useState(new Set());
+  const [methodFilter, setMethodFilter] = useState('');
   const togglePkg = (name) => setCollapsedPkgs(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
   const toggleCls = (name) => setCollapsedCls(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
 
@@ -1233,6 +1235,30 @@ export default function MainPanel({
       </div>
 
 
+      {/* 메서드 필터 검색창 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', backgroundColor: '#0F141A', border: '1px solid #30363d', borderRadius: '6px' }}>
+        <span style={{ fontSize: '0.85rem', color: '#6b7280', flexShrink: 0 }}>🔍</span>
+        <input
+          type="text"
+          placeholder="메서드 이름으로 필터..."
+          value={methodFilter}
+          onChange={(e) => setMethodFilter(e.target.value)}
+          style={{
+            flex: 1, background: 'transparent', border: 'none', outline: 'none',
+            color: '#e5e7eb', fontSize: '0.875rem', fontFamily: 'ui-monospace, monospace',
+          }}
+        />
+        {methodFilter && (
+          <button onClick={() => setMethodFilter('')} style={{ background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: '1rem', padding: '0 4px' }}>✕</button>
+        )}
+        <span style={{ fontSize: '0.75rem', color: '#4b5563', flexShrink: 0 }}>
+          <span style={{ color: '#10b981' }}>●</span> public &nbsp;
+          <span style={{ color: '#f59e0b' }}>●</span> protected &nbsp;
+          <span style={{ color: '#6b7280' }}>●</span> private &nbsp;
+          <span style={{ color: '#60a5fa' }}>●</span> package
+        </span>
+      </div>
+
       {/* Main Content Area */}
       <div style={{ display: 'flex', gap: '1rem', flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
         {/* Package Grid */}
@@ -1278,10 +1304,17 @@ export default function MainPanel({
                   {pkg.classes?.length || 0} classes
                 </span>
               </div>
-              {(pkg?.classes || []).map((cls) => (
+              {(pkg?.classes || []).map((cls) => {
+                const q = methodFilter.toLowerCase();
+                const filteredMethods = q
+                  ? (cls.methods || []).filter(m => m.sig.toLowerCase().includes(q))
+                  : cls.methods;
+                if (q && filteredMethods.length === 0) return null;
+                const clsData = { ...cls, methods: filteredMethods };
+                return (
                 <ClassCard
                   key={cls.name}
-                  data={cls}
+                  data={clsData}
                   classOverlay={classOverlayMap.get(cls.name)}
                   methodOverlay={methodOverlayMap || new Map()}
                   registerRef={(el) => registerRef(el, cls.name)}
@@ -1297,7 +1330,8 @@ export default function MainPanel({
                   selected={selected}
                   onToggleSelect={toggleSelection}
                 />
-              ))}
+                );
+              })}
             </div>
           ))}
 

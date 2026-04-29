@@ -30,6 +30,12 @@ FIELD_RE = re.compile(
     re.X | re.M
 )
 
+def _extract_visibility(sig: str) -> str:
+    if re.search(r'\bprivate\b', sig):   return 'private'
+    if re.search(r'\bprotected\b', sig): return 'protected'
+    if re.search(r'\bpublic\b', sig):    return 'public'
+    return 'package'
+
 def _find_package(text: str) -> str:
     """소스 코드에서 패키지명 추출"""
     match = PKG_RE.search(text)
@@ -250,10 +256,12 @@ def index_workspace(workspace: Path) -> Dict[str, Any]:
                 normalized_sig = normalize_method_signature(sig)
 
                 method_summary = {
-                    "id": method_id,              # 공식 앵커 (m:com.example.Parser.String parseTokens(String))
-                    "sig": normalized_sig,        # 정규화된 시그니처 (UI 표시용)
+                    "id": method_id,
+                    "sig": normalized_sig,
+                    "visibility": _extract_visibility(sig),
+                    "static": bool(re.search(r'\bstatic\b', sig)),
                     "loc": loc,
-                    "collapsed": loc > 20,  # 기본값, 나중에 파라미터로 조정
+                    "collapsed": loc > 20,
                     "preview": f"{normalized_sig} {{ ... }}",
                     "range": {
                         "start": [sl, sc],
