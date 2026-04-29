@@ -27,11 +27,13 @@ function ClassCard({
   lineDiff,
   editMode,
   onClassAi,
-  methodHighlights = {},  // ← 기본값 추가
-  classHighlights = {},   // ← 기본값 추가
+  methodHighlights = {},
+  classHighlights = {},
   multi = false,
   selected = new Set(),
   onToggleSelect = () => {},
+  collapsed = false,
+  onToggleCollapse = () => {},
 }) {
   const ring = classOverlay === OverlayChangeKind.ADDED
     ? "ring-2 ring-emerald-500"
@@ -49,11 +51,16 @@ function ClassCard({
             border: '1px solid #30363d',
             overflow: 'hidden'
           }}>
-      <CardHeader style={{
-        background: 'linear-gradient(to bottom, #1c2128, #161b22)',
-        borderBottom: '1px solid #21262d',
-        padding: '1rem 1.25rem'
-      }}>
+      <CardHeader
+        onClick={onToggleCollapse}
+        style={{
+          background: 'linear-gradient(to bottom, #1c2128, #161b22)',
+          borderBottom: collapsed ? 'none' : '1px solid #21262d',
+          padding: '1rem 1.25rem',
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <CardTitle style={{
@@ -65,15 +72,11 @@ function ClassCard({
               alignItems: 'center',
               gap: '0.5rem'
             }}>
-              <span style={{
-                display: 'inline-block',
-                width: '6px',
-                height: '6px',
-                borderRadius: '50%',
-                backgroundColor: '#58a6ff',
-                flexShrink: 0
-              }}/>
+              <span style={{ fontSize: '9px', color: '#6e7681' }}>{collapsed ? '▶' : '▼'}</span>
               {data.name}
+              <span style={{ fontSize: '11px', color: '#6e7681', fontWeight: 400 }}>
+                {data.methods?.length || 0}
+              </span>
             </CardTitle>
             <span style={{
               display: 'block',
@@ -124,7 +127,7 @@ function ClassCard({
           )}
         </div>
       </CardHeader>
-      <CardContent style={{ padding: '0.75rem 1rem' }}>
+      {!collapsed && <CardContent style={{ padding: '0.75rem 1rem' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {data.methods.map((m) => (
             <MethodRow
@@ -144,7 +147,7 @@ function ClassCard({
             />
           ))}
         </div>
-      </CardContent>
+      </CardContent>}
     </Card>
   );
 }
@@ -244,6 +247,11 @@ function MethodRow({
     : overlay === OverlayChangeKind.REMOVED  ? "#6b7280"
     : visibilityColor;
   const removed = overlay === OverlayChangeKind.REMOVED;
+  // LOC 히트맵: 20줄 이하 = 없음, ~50줄 = 약한 주황, 50줄 초과 = 주황
+  const loc = m.loc || 0;
+  const locTint = loc <= 20 ? 'transparent'
+    : loc <= 50 ? 'rgba(245,158,11,0.04)'
+    : 'rgba(245,158,11,0.09)';
 
   return (
     <div
@@ -251,7 +259,7 @@ function MethodRow({
         position: 'relative',
         borderRadius: '10px',
         border: selected ? '1.5px solid #58a6ff' : '1px solid #21262d',
-        backgroundColor: selected ? '#0d1117' : '#0d1117',
+        backgroundColor: selected ? '#0d1117' : locTint,
         padding: '0.625rem 0.75rem',
         fontSize: '0.8125rem',
         cursor: removed ? 'default' : 'pointer',
@@ -267,7 +275,7 @@ function MethodRow({
         if (!removed) e.currentTarget.style.backgroundColor = '#161b22';
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.backgroundColor = selected ? '#0d1117' : '#0d1117';
+        e.currentTarget.style.backgroundColor = selected ? '#0d1117' : locTint;
       }}
     >
       <div style={{
@@ -1408,6 +1416,8 @@ export default function MainPanel({
                   multi={multi}
                   selected={selected}
                   onToggleSelect={toggleSelection}
+                  collapsed={collapsedCls.has(cls.name)}
+                  onToggleCollapse={(e) => { e?.stopPropagation?.(); toggleCls(cls.name); }}
                 />
                 );
               })}
