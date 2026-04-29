@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# 환경 변수
+.env
+
+# 런타임 데이터
+.contextpanel/context.db
+.contextpanel/checkpoints/
+.contextpanel/cache/
+.contextpanel/packets/
+.contextpanel/recipes/
+
+# 프론트엔드 빌드
+frontend/node_modules/
+frontend/dist/
+
+# 테스트 출력
+test_indexer_output.json
+
+# OS
+nul
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.suo

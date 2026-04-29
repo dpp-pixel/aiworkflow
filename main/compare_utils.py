@@ -5,7 +5,7 @@ from typing import Dict, Any, Iterable
 import re, json, hashlib
 
 from .utils import WORKSPACE
-from .anchor_utils import anchor_method, anchor_cls, anchor_pkg
+from .anchor_utils import anchor_cls, anchor_pkg, anchor_method
 # 내부 파서를 재사용하기 위해 java_indexer의 헬퍼를 import
 from .java_indexer import _find_package, _iter_classes, _find_methods
 
@@ -97,7 +97,7 @@ def index_filemap(filemap: Dict[str, str]) -> Dict[str, Any]:
                 body_txt = "\n".join(lines[sl:el+1])
                 h = _sha(_norm_ws(body_txt))
                 loc = (el - sl + 1)
-                a = anchor_method(package, cls_name, sig)
+                a = anchor_method(package, cls_name, sig)  # 공식 anchor 사용 (비교/diff 작업)
                 anchors[a] = {
                     "file": path,
                     "hash": h,

@@ -17,7 +17,7 @@ echo.
 echo ========================================
 echo Both servers are starting...
 echo Backend: http://localhost:8001
-echo Frontend: http://localhost:3000
+echo Frontend: http://localhost:5173
 echo ========================================
 echo.
 echo Press any key to exit this window (servers will keep running)
