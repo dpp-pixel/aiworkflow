@@ -353,24 +353,12 @@ function MethodRow({
       </div>
       {expanded && (
         <div className="relative" style={{ marginTop: '0.75rem' }}>
-          {/* 코드뷰 상단 툴바 */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px', backgroundColor: '#161b22', borderRadius: '8px 8px 0 0', border: '1px solid #21262d', borderBottom: 'none' }}>
-            <span style={{ fontSize: '11px', color: '#6e7681', fontFamily: 'ui-monospace, monospace' }}>
-              {m.sig}
-            </span>
-            <button
-              onClick={() => navigator.clipboard?.writeText(expanded.body ?? '')}
-              style={{ background: 'none', border: '1px solid #30363d', borderRadius: '4px', color: '#8b949e', cursor: 'pointer', fontSize: '11px', padding: '2px 8px' }}
-              onMouseOver={(e) => e.currentTarget.style.color = '#c9d1d9'}
-              onMouseOut={(e) => e.currentTarget.style.color = '#8b949e'}
-            >복사</button>
-          </div>
           <div
             style={{
               maxHeight: '400px',
               overflowY: 'auto',
               overflowX: 'auto',
-              borderRadius: '0 0 8px 8px',
+              borderRadius: '8px',
               backgroundColor: '#0d1117',
               border: '1px solid #21262d',
               padding: '1rem',
