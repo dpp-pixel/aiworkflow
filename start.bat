@@ -31,6 +31,11 @@ echo Both servers are starting...
 echo Backend: http://localhost:8001
 echo Frontend: http://localhost:5173
 echo ========================================
+
+REM 브라우저 자동 열기 (프론트엔드가 뜰 때까지 잠깐 대기)
+timeout /t 3 /nobreak > nul
+start http://localhost:5173
+
 echo.
 echo Press any key to exit this window (servers will keep running)
 pause > nul
