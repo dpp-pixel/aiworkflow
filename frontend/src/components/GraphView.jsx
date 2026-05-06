@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { forceCenter, forceLink, forceManyBody, forceSimulation, forceCollide, forceRadial } from "d3-force";
+import { forceCenter, forceLink, forceManyBody, forceSimulation, forceCollide, forceRadial, forceX, forceY } from "d3-force";
 import { cn } from "@/lib/utils";
 
 // ---------- Graph Node Component ----------
@@ -108,6 +108,7 @@ export default function GraphView({
   const dragNodeRef = useRef(null);
   const abortRef = useRef();
   const isDraggingNodeRef = useRef(false); // 노드 드래그 상태
+  const hoverNodeRef = useRef(null);       // 마우스 오버 노드 (hover dim용)
 
   // API 기본 주소 가져오기
   const getApiBase = () => {
@@ -365,8 +366,10 @@ export default function GraphView({
         return true;
       });
 
-      // 6) 레이아웃 힌트(선택): 패키지는 트리 정렬, 클래스는 자유롭게(혹은 패키지 주변)
-      const gapX = 220, gapY = 120;
+      // 6) 레이아웃 힌트: 패키지는 위→아래 트리 정렬 (캔버스 중심 기준)
+      const gapX = 200, gapY = 160;
+      const treeCx = canvas.clientWidth / 2;
+      const treeCy = canvas.clientHeight / 2;
       const byDepth = new Map();
       for (const n of nodes) {
         if (!isPkg(n.id)) continue;
@@ -374,16 +377,14 @@ export default function GraphView({
         if (!byDepth.has(d)) byDepth.set(d, []);
         byDepth.get(d).push(n);
       }
+      const maxTreeDepth = byDepth.size > 0 ? Math.max(...byDepth.keys()) : 0;
       for (const [d, arr] of byDepth) {
         arr.sort((a, b) => pkgKey(a.id).localeCompare(pkgKey(b.id)));
         arr.forEach((n, i) => {
-          n._tx = d * gapX; // 패키지 타깃 x
-          n._ty = (i - (arr.length - 1) / 2) * gapY; // 패키지 타깃 y
+          n._tx = treeCx + (i - (arr.length - 1) / 2) * gapX; // 같은 깊이 노드 수평 배분
+          n._ty = treeCy - (maxTreeDepth * gapY / 2) + d * gapY; // 깊이별 수직 배치 (중앙 정렬)
         });
       }
-      // 클래스에게는 '자기 패키지 주변으로 부드럽게 끌기' 옵션을 주고 싶다면,
-      // tick에서 (n._tx/_ty가 없는) 클래스에 대해 belongs_to 링크를 기준으로
-      // 그 패키지 좌표 쪽으로 미세한 흡착력(vx/vy 보정)을 주면 정리됨.
     } else if (level === 'class') {
       // 클래스 레벨: 백엔드에서 온 클래스 노드만 사용
       nodes = nodes.filter(n => isCls(n.id));
@@ -465,16 +466,40 @@ export default function GraphView({
     const onResize = () => requestAnimationFrame(fit);
     window.addEventListener("resize", onResize);
 
-    // ★ 0) 원형 seed 배치
+    // ★ 0) seed 배치
     const cx = canvas.clientWidth / 2;
     const cy = canvas.clientHeight / 2;
     const r0 = Math.min(canvas.clientWidth, canvas.clientHeight) * 0.28;
-    visNodes.forEach((n, i) => {
-      const t = (i / visNodes.length) * Math.PI * 2;
-      n.x = cx + r0 * Math.cos(t);
-      n.y = cy + r0 * Math.sin(t);
-      n.vx = n.vy = 0;
-    });
+    if (level === 'class') {
+      // 클래스 레벨: 같은 패키지 노드를 클러스터로 묶어서 배치 → 수렴 빠르고 배치 자연스러움
+      const pkgGroupsMap = new Map();
+      visNodes.forEach(n => {
+        const pid = toPkgId(n.id) || '__root__';
+        if (!pkgGroupsMap.has(pid)) pkgGroupsMap.set(pid, []);
+        pkgGroupsMap.get(pid).push(n);
+      });
+      const groups = [...pkgGroupsMap.values()];
+      groups.forEach((group, gi) => {
+        const angle = (gi / groups.length) * Math.PI * 2;
+        const clx = cx + r0 * 0.65 * Math.cos(angle);
+        const cly = cy + r0 * 0.65 * Math.sin(angle);
+        const innerR = group.length > 1 ? Math.min(28, r0 * 0.18) : 0;
+        group.forEach((n, j) => {
+          const a = (j / group.length) * Math.PI * 2;
+          n.x = clx + innerR * Math.cos(a);
+          n.y = cly + innerR * Math.sin(a);
+          n.vx = n.vy = 0;
+        });
+      });
+    } else {
+      // 패키지 레벨: 원형 seed (forceX/Y가 트리 위치로 끌어당김)
+      visNodes.forEach((n, i) => {
+        const t = (i / visNodes.length) * Math.PI * 2;
+        n.x = cx + r0 * Math.cos(t);
+        n.y = cy + r0 * Math.sin(t);
+        n.vx = n.vy = 0;
+      });
+    }
 
     // Build neighbor map for dimming
     const nbr = new Map();
@@ -488,20 +513,27 @@ export default function GraphView({
     });
     nbrRef.current = nbr;   // ← 최신 이웃 맵 보관
 
+    // hover 또는 선택 노드 기준 — Obsidian처럼 비연결 노드는 매우 강하게 dim
     const alphaNode = (id) => {
-      if (isDraggingNodeRef.current) return 1;       // 드래그 중엔 흐림 끔
+      if (isDraggingNodeRef.current) return 1;
       const sel = selectedRef.current;
-      if (!sel) return 1;
-      if (id === sel) return 1;
-      return nbrRef.current.get(sel)?.has(id) ? 1 : 0.2;
+      const hov = hoverNodeRef.current;
+      const active = sel || hov;
+      if (!active) return 1;
+      if (id === sel || id === hov) return 1;
+      const nbrs = nbrRef.current;
+      if ((sel && nbrs.get(sel)?.has(id)) || (hov && nbrs.get(hov)?.has(id))) return 0.85;
+      return 0.06;
     };
 
     const alphaEdge = (sourceId, targetId) => {
-      if (isDraggingNodeRef.current) return 1;       // 드래그 중엔 흐림 끔
+      if (isDraggingNodeRef.current) return 1;
       const sel = selectedRef.current;
-      if (!sel) return 1;
-      if (sourceId === sel || targetId === sel) return 1;
-      return 0.15;
+      const hov = hoverNodeRef.current;
+      const active = sel || hov;
+      if (!active) return 1;
+      if (sourceId === sel || targetId === sel || sourceId === hov || targetId === hov) return 1;
+      return 0.04;
     };
 
     // LOD filter by zoom level
@@ -511,24 +543,47 @@ export default function GraphView({
       return allLinks;
     };
 
-    // Multi-edge curve indexing
-    const grouped = new Map();
+    // 방향 쌍별 그룹화 — 양방향 감지 및 혼합 타입 처리
+    // key: "a|b" (a <= b 기준 정렬), aToB/bToA 배열에 각 방향 엣지 수집
+    const pairEdges = new Map();
     links.forEach(l => {
-      const k = `${l.source}->${l.target}`;
-      const arr = grouped.get(k) || (grouped.set(k, []), grouped.get(k));
-      arr.push(l);
-      l._idx = arr.length - 1;
-      l._cnt = arr.length;
+      const sid = l.source?.id ?? l.source;
+      const tid = l.target?.id ?? l.target;
+      const [a, b] = sid <= tid ? [sid, tid] : [tid, sid];
+      const key = `${a}|${b}`;
+      if (!pairEdges.has(key)) pairEdges.set(key, { a, b, aToB: [], bToA: [] });
+      const p = pairEdges.get(key);
+      (sid === a ? p.aToB : p.bToA).push(l);
     });
 
     // Container resize observer
     const ro = new ResizeObserver(() => requestAnimationFrame(fit));
     if (canvas.parentElement) ro.observe(canvas.parentElement);
 
+    // degree 기반 노드 반경 (화면 고정 크기 — Obsidian처럼 허브일수록 크게)
+    const nodeR = (n) => {
+      const d = degree.get(n.id) || 0;
+      const base = isPkg(n.id) ? 6 : 4;
+      return (base + Math.sqrt(d) * 1.5) / tr.current.k;
+    };
+
+    // 엣지 타입별 색상 (하이라이트 시에만 사용)
+    const edgeTypeColor = (kind, a) => {
+      switch (kind) {
+        case 'belongs_to': return `rgba(52,211,153,${a})`;
+        case 'structure':  return `rgba(129,140,248,${a})`;
+        case 'extends':    return `rgba(251,191,36,${a})`;
+        case 'implements': return `rgba(34,211,238,${a})`;
+        case 'calls':      return `rgba(96,165,250,${a})`;
+        case 'references': return `rgba(167,139,250,${a})`;
+        default:           return `rgba(148,163,184,${a})`;
+      }
+    };
+
     // Arrowhead drawing function
     const drawArrow = (sx, sy, tx, ty) => {
       const ang = Math.atan2(ty - sy, tx - sx);
-      const size = 6 / tr.current.k;
+      const size = 7 / tr.current.k;
       ctx.beginPath();
       ctx.moveTo(tx, ty);
       ctx.lineTo(tx - size * Math.cos(ang - Math.PI/6), ty - size * Math.sin(ang - Math.PI/6));
@@ -549,147 +604,200 @@ export default function GraphView({
       ctx.scale(dpr, dpr);
       ctx.setTransform(k * dpr, 0, 0, k * dpr, x * dpr, y * dpr);
 
-      // Apply LOD filter
-      const visibleLinks = filterByLOD(links, k);
+      // Draw edges — 양방향/혼합 타입 지원
+      // - 같은 타입 양방향: 단일선 + ◀──▶ 양쪽 화살표
+      // - 다른 타입 양방향: 중간점에서 반씩 ▶◀ 화살표가 맞닿음
+      // - 같은 방향 2가지 타입: 앞반부/뒷반부로 색상 분리
+      for (const [, pair] of pairEdges) {
+        const aToBVis = filterByLOD(pair.aToB, k);
+        const bToAVis = filterByLOD(pair.bToA, k);
+        if (!aToBVis.length && !bToAVis.length) continue;
 
-      // Draw edges
-      for (const link of visibleLinks) {
-        const sourceNode = nodes.find(n => n.id === link.source.id || n.id === link.source);
-        const targetNode = nodes.find(n => n.id === link.target.id || n.id === link.target);
-        if (!sourceNode || !targetNode) continue;
+        const nodeA = nodesById.get(pair.a);
+        const nodeB = nodesById.get(pair.b);
+        if (!nodeA || !nodeB) continue;
 
-        const sx = sourceNode.x || 0, sy = sourceNode.y || 0;
-        const tx = targetNode.x || 0, ty = targetNode.y || 0;
+        const ax = nodeA.x || 0, ay = nodeA.y || 0;
+        const bx0 = nodeB.x || 0, by0 = nodeB.y || 0;
+        const dist = Math.hypot(bx0 - ax, by0 - ay);
+        if (dist < 1) continue;
 
-        // Apply dimming alpha
-        const edgeAlpha = alphaEdge(sourceNode.id, targetNode.id);
+        const ux = (bx0 - ax) / dist, uy = (by0 - ay) / dist;
+        const rA = nodeR(nodeA), rB = nodeR(nodeB);
+        const eax = ax  + ux * rA,  eay = ay  + uy * rA;
+        const ebx = bx0 - ux * rB,  eby = by0 - uy * rB;
+        const midX = (eax + ebx) / 2, midY = (eay + eby) / 2;
 
-        // 엣지 종류별 굵기
-        ctx.lineWidth = (
-          link.kind === 'belongs_to' ? 1.6 :
-          link.kind === 'structure' ? 1.2 :
-          link.kind === 'calls' ? 1.0 :
-          link.kind === 'references' ? 0.7 :
-          link.kind === 'cohesion' ? 0.6 : 1.0
-        ) / k;
+        const edgeAlpha = alphaEdge(nodeA.id, nodeB.id);
+        const isHL =
+          selectedRef.current === nodeA.id || selectedRef.current === nodeB.id ||
+          hoverNodeRef.current === nodeA.id || hoverNodeRef.current === nodeB.id;
 
-        // 엣지 종류별 대시 패턴
-        ctx.setLineDash(
-          link.kind === 'cohesion' ? [3/k, 3/k] : []
-        );
+        // 선분 그리기 헬퍼
+        const seg = (x1, y1, x2, y2, kind) => {
+          if (isHL) {
+            ctx.strokeStyle = edgeTypeColor(kind, 0.9 * edgeAlpha);
+            ctx.lineWidth = 1.6 / k;
+            ctx.setLineDash(kind === 'implements' ? [6/k,3/k] : kind === 'references' ? [3/k,3/k] : []);
+            ctx.shadowBlur = 6 / k;
+            ctx.shadowColor = edgeTypeColor(kind, 0.5);
+          } else {
+            ctx.strokeStyle = `rgba(148,163,184,${0.35 * edgeAlpha})`;
+            ctx.lineWidth = 1.1 / k;
+            ctx.setLineDash([]);
+            ctx.shadowBlur = 2 / k;
+            ctx.shadowColor = 'rgba(148,163,184,0.2)';
+          }
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.shadowBlur = 0; ctx.setLineDash([]);
+        };
 
-        // 엣지 종류별 색상 with alpha
-        const baseAlpha =
-          link.kind === 'belongs_to' ? 0.85 :
-          link.kind === 'structure' ? 0.45 :
-          link.kind === 'calls' ? 0.75 :
-          link.kind === 'references' ? 0.35 :
-          link.kind === 'cohesion' ? 0.25 : 0.85;
+        // 화살표 헬퍼 (하이라이트 시만)
+        const arr = (x1, y1, x2, y2) => {
+          if (!isHL) return;
+          ctx.globalAlpha = edgeAlpha;
+          drawArrow(x1, y1, x2, y2);
+          ctx.globalAlpha = 1;
+        };
 
-        ctx.strokeStyle =
-          link.kind === 'belongs_to' ? `rgba(120,220,170,${baseAlpha * edgeAlpha})` :
-          link.kind === 'structure' ? `rgba(150,160,255,${baseAlpha * edgeAlpha})` :
-          link.kind === 'calls' ? `rgba(200,200,255,${baseAlpha * edgeAlpha})` :
-          link.kind === 'references' ? `rgba(200,200,255,${baseAlpha * edgeAlpha})` :
-          link.kind === 'cohesion' ? `rgba(180,180,200,${baseAlpha * edgeAlpha})` : `rgba(203,213,225,${baseAlpha * edgeAlpha})`;
+        const isBidi = aToBVis.length > 0 && bToAVis.length > 0;
 
-        // Multi-edge curve
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        if (link._cnt > 1) {
-          const mid = { x: (sx + tx) / 2, y: (sy + ty) / 2 };
-          const off = (link._idx - (link._cnt - 1) / 2) * 6;
-          const nx = ty - sy, ny = sx - tx;
-          const len = Math.hypot(nx, ny) || 1;
-          const ctrl = { x: mid.x + (nx / len) * off, y: mid.y + (ny / len) * off };
-          ctx.quadraticCurveTo(ctrl.x, ctrl.y, tx, ty);
+        if (isBidi) {
+          const fwd = aToBVis[0], bwd = bToAVis[0];
+          if (fwd.kind === bwd.kind) {
+            // 같은 타입 양방향 — 단일선 + 양쪽 화살표
+            seg(eax, eay, ebx, eby, fwd.kind);
+            arr(ebx, eby, eax, eay);  // ◀ B→A
+            arr(eax, eay, ebx, eby);  // ▶ A→B
+          } else {
+            // 다른 타입 양방향 — 중간에서 반씩, 화살표 ▶◀ 맞닿음
+            seg(eax, eay, midX, midY, fwd.kind);
+            arr(eax, eay, midX, midY);
+            seg(ebx, eby, midX, midY, bwd.kind);
+            arr(ebx, eby, midX, midY);
+          }
         } else {
-          ctx.lineTo(tx, ty);
-        }
-        ctx.stroke();
+          // 단방향
+          const edges = aToBVis.length ? aToBVis : bToAVis;
+          const [x1, y1, x2, y2] = aToBVis.length
+            ? [eax, eay, ebx, eby]
+            : [ebx, eby, eax, eay];
 
-        // Draw arrowhead
-        ctx.globalAlpha = edgeAlpha;
-        drawArrow(sx, sy, tx, ty);
-        ctx.globalAlpha = 1;
+          if (edges.length === 1) {
+            seg(x1, y1, x2, y2, edges[0].kind);
+            arr(x1, y1, x2, y2);
+          } else if (edges.length === 2) {
+            // 같은 방향 2가지 타입 — 앞반부/뒷반부로 색상 분리
+            const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+            seg(x1, y1, mx, my, edges[0].kind);
+            seg(mx, my, x2, y2, edges[1].kind);
+            arr(x1, y1, x2, y2);
+          } else {
+            // 3개 이상 — 수직 오프셋 곡선
+            edges.forEach((l, i) => {
+              const off = (i - (edges.length - 1) / 2) * 10;
+              const ctrl = { x: midX - uy * off, y: midY + ux * off };
+              if (isHL) {
+                ctx.strokeStyle = edgeTypeColor(l.kind, 0.9 * edgeAlpha);
+                ctx.lineWidth = 1.4 / k;
+                ctx.shadowBlur = 5 / k;
+                ctx.shadowColor = edgeTypeColor(l.kind, 0.5);
+              } else {
+                ctx.strokeStyle = `rgba(148,163,184,${0.35 * edgeAlpha})`;
+                ctx.lineWidth = 1.1 / k;
+                ctx.shadowBlur = 2 / k;
+                ctx.shadowColor = 'rgba(148,163,184,0.2)';
+              }
+              ctx.setLineDash([]);
+              ctx.beginPath(); ctx.moveTo(x1, y1);
+              ctx.quadraticCurveTo(ctrl.x, ctrl.y, x2, y2);
+              ctx.stroke();
+              ctx.shadowBlur = 0;
+              arr(x1, y1, x2, y2);
+            });
+          }
+        }
       }
 
-      // Draw nodes
+      // Draw nodes — Obsidian 스타일: 방사형 글로우 + degree 비례 크기
       for (const node of visNodes) {
         const nx = node.x || 0;
         const ny = node.y || 0;
         const nodeAlpha = alphaNode(node.id);
-        const color = node.overlay === "added" ? "#10b981" :
-                     node.overlay === "modified" ? "#f59e0b" :
-                     node.overlay === "removed" ? "#94a3b8" : "#3b82f6";
+        const r = nodeR(node);
+
+        const isSelected = selectedRef.current === node.id;
+        const isHovered  = hoverNodeRef.current === node.id;
+
+        const hexColor =
+          node.overlay === 'added'    ? '#10b981' :
+          node.overlay === 'modified' ? '#f59e0b' :
+          node.overlay === 'removed'  ? '#94a3b8' :
+          isPkg(node.id)              ? '#818cf8' : '#60a5fa';
+
+        const coreColor = isSelected ? '#fbbf24' : (isHovered ? '#e2e8f0' : hexColor);
 
         ctx.globalAlpha = nodeAlpha;
 
-        // 패키지는 사각형, 클래스는 원형
+        // 외곽 aura (방사형 그라디언트)
+        const auraR = r * (isSelected || isHovered ? 5.5 : 3.5);
+        const grad = ctx.createRadialGradient(nx, ny, r * 0.3, nx, ny, auraR);
+        grad.addColorStop(0, hexColor + (isSelected || isHovered ? '66' : '40'));
+        grad.addColorStop(1, hexColor + '00');
+        ctx.beginPath();
+        ctx.arc(nx, ny, auraR, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // 노드 코어 (bloom)
+        ctx.shadowBlur = r * (isSelected || isHovered ? 5 : 2.5);
+        ctx.shadowColor = coreColor;
+        ctx.beginPath();
+        ctx.arc(nx, ny, r, 0, Math.PI * 2);
+        ctx.fillStyle = coreColor;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // 패키지 배지 (+N collapsed)
         if (isPkg(node.id)) {
-          const s = 10 / k;
-          ctx.beginPath();
-          ctx.rect(nx - s, ny - s, s * 2, s * 2);
-          ctx.fillStyle = 'rgba(80,120,200,.9)';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(180,200,255,.9)';
-          ctx.lineWidth = 1 / k;
-          ctx.stroke();
-
-          // Selected highlight
-          if (selectedNodeId === node.id) {
-            ctx.strokeStyle = "#fbbf24";
-            ctx.lineWidth = 3 / k;
-            ctx.rect(nx - s - 4/k, ny - s - 4/k, s * 2 + 8/k, s * 2 + 8/k);
-            ctx.stroke();
-          }
-
-          // Package badge (+N)
           const members = membersByPkg.get(node.id) || [];
           const hiddenCount = collapsedPkgs.has(node.id) ? members.length : 0;
           if (hiddenCount > 0) {
             const text = `+${hiddenCount}`;
-            const padX = 4 / k, padY = 2 / k;
-            ctx.font = `${12 / k}px ui-sans-serif`;
-            const w = ctx.measureText(text).width + padX * 2;
-            const h = 16 / k;
-            const bx = nx + 12 / k, by = ny - 12 / k - h;
-            const r = 6 / k;
-
+            ctx.font = `${11 / k}px ui-sans-serif`;
+            const tw = ctx.measureText(text).width;
+            const bx = nx + r + 2/k, by = ny - r - 14/k;
+            const bw = tw + 8/k, bh = 14/k, br = 4/k;
             ctx.beginPath();
-            ctx.moveTo(bx + r, by);
-            ctx.arcTo(bx + w, by, bx + w, by + h, r);
-            ctx.arcTo(bx + w, by + h, bx, by + h, r);
-            ctx.arcTo(bx, by + h, bx, by, r);
-            ctx.arcTo(bx, by, bx + w, by, r);
-            ctx.fillStyle = 'rgba(50,70,120,0.9)';
+            ctx.moveTo(bx + br, by);
+            ctx.arcTo(bx + bw, by, bx + bw, by + bh, br);
+            ctx.arcTo(bx + bw, by + bh, bx, by + bh, br);
+            ctx.arcTo(bx, by + bh, bx, by, br);
+            ctx.arcTo(bx, by, bx + bw, by, br);
+            ctx.fillStyle = 'rgba(40,50,100,0.88)';
+            ctx.shadowBlur = 3/k;
+            ctx.shadowColor = '#818cf8';
             ctx.fill();
-            ctx.fillStyle = '#dfe8ff';
-            ctx.fillText(text, bx + padX, by + h - 4 / k);
-          }
-        } else {
-          ctx.beginPath();
-          ctx.fillStyle = color;
-          ctx.arc(nx, ny, 8 / k, 0, Math.PI * 2);
-          ctx.fill();
-
-          // Selected highlight
-          if (selectedNodeId === node.id) {
-            ctx.beginPath();
-            ctx.strokeStyle = "#fbbf24";
-            ctx.lineWidth = 3 / k;
-            ctx.arc(nx, ny, 12 / k, 0, Math.PI * 2);
-            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#c7d2fe';
+            ctx.fillText(text, bx + 4/k, by + bh - 3/k);
           }
         }
 
-        // Node label
-        if (k > 0.5) {
-          ctx.fillStyle = "#e5e7eb";
-          ctx.font = `${Math.max(10, 12 / k)}px Arial`;
-          ctx.textAlign = "center";
-          const displayLabel = nodeLabel(node);
-          ctx.fillText(displayLabel, nx, ny + 20 / k);
+        // 레이블 — 줌 레벨 + 차수 기반 페이드인
+        const deg = degree.get(node.id) || 0;
+        const zoomFade  = Math.min(1, Math.max(0, (k - 0.55) / 0.45));
+        const hubFade   = deg >= 3 ? Math.min(1, 0.6 + deg * 0.05) : 0;
+        const labelAlpha = Math.max(zoomFade * 0.92, hubFade) * nodeAlpha;
+        if (labelAlpha > 0.04) {
+          ctx.globalAlpha = labelAlpha;
+          ctx.fillStyle = isSelected ? '#fef3c7' : '#e2e8f0';
+          ctx.font = `${Math.max(9, 11/k)}px -apple-system, "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.shadowBlur = 4 / k;
+          ctx.shadowColor = 'rgba(0,0,0,0.95)';
+          ctx.fillText(nodeLabel(node), nx, ny + r + 12/k);
+          ctx.shadowBlur = 0;
         }
 
         ctx.globalAlpha = 1;
@@ -719,22 +827,20 @@ export default function GraphView({
       return mctx.measureText(text).width || 0;
     };
 
-    // 충돌 반경: 노드 반경 + 라벨 절반 + 여유
+    // A: 충돌 반경 강화 — 라벨 공간 + 여유 증가
     const collideForce = forceCollide()
-      .radius(n => (String(n.id).startsWith('pkg:') ? 12 : 7) + labelWidth(n) * 0.5 + 6)
-      .strength(0.9)
-      .iterations(3);
+      .radius(n => (String(n.id).startsWith('pkg:') ? 14 : 9) + labelWidth(n) * 0.55 + 12)
+      .strength(1.0)
+      .iterations(4);
 
-    // ★ 2) 차수별 전하 + 최소거리로 "너무 가까움" 방지
-    // 허브일수록 더 강하게 밀어내기 + 최소/최대 거리 가드
+    // A: 반발력 3배 강화 — 비연결 노드를 멀리 밀어내야 선 교차가 줄어듦
     const chargeForce = forceManyBody()
       .strength(n => {
         const d = degree.get(n.id) || 0;
-        // 허브(연결 많음) = 더 큰 반발, 리프 = 약한 반발
-        return -40 - Math.min(d, 8) * 6;   // -40 ~ -88
+        return -100 - Math.min(d, 10) * 15;  // -100 ~ -250 (기존 -40 ~ -88)
       })
-      .distanceMin(30)   // 이보다 가까워지면 강하게 밀어냄
-      .distanceMax(320); // 너무 멀어질 때는 영향 적게
+      .distanceMin(20)
+      .distanceMax(500);
 
     const isLeafLink = l => {
       const sid = l.source.id || l.source;
@@ -742,25 +848,26 @@ export default function GraphView({
       return isLeaf(sid) || isLeaf(tid);
     };
 
+    // A: 링크 거리 조정 + 강도 강화 — calls 짧게(밀집), references 길게(분리)
     const linkForce = forceLink(visLinks)
       .id(d => d.id)
       .distance(l => {
         const base = ({
-          belongs_to: 40,
-          structure: 100,
-          calls: 110,
-          references: 160,
-          cohesion: 180
-        }[l.kind] ?? 100);
-        return base + (isLeafLink(l) ? 20 : 0); // 리프 간섭 시 조금 더 길게
+          belongs_to: 45,
+          structure: 120,
+          calls: 75,       // 짧게 → 호출 클래스끼리 가깝게 클러스터
+          references: 110,
+          cohesion: 150
+        }[l.kind] ?? 90);
+        return base + (isLeafLink(l) ? 15 : 0);
       })
       .strength(l => ({
-        belongs_to: 0.8,
-        structure: 0.2,
-        calls: 0.15,
-        references: 0.08,
-        cohesion: 0.05
-      }[l.kind] ?? 0.3));
+        belongs_to: 0.9,
+        structure: 0.25,
+        calls: 0.35,       // 강화 — 호출 관계가 레이아웃을 주도
+        references: 0.15,
+        cohesion: 0.06
+      }[l.kind] ?? 0.35));
 
     // ★ 2) 라디얼 힘 정의 (워밍업 / 런타임 공통 함수)
     const radialRadiusFn = n => {
@@ -769,7 +876,8 @@ export default function GraphView({
       return baseR + (maxDeg - d) * stepR; // 리프 바깥, 허브 안쪽
     };
 
-    const radial = forceRadial(radialRadiusFn, cx, cy).strength(0.07);
+    // A: 라디얼 강도 강화 — 노드를 중심에서 펼쳐 교차 감소
+    const radial = forceRadial(radialRadiusFn, cx, cy).strength(n => n._tx != null ? 0 : 0.12);
 
     // 허브와 리프(차수=1) 관계 준비
     const isLeaf = id => (degree.get(id) || 0) === 1;
@@ -808,17 +916,22 @@ export default function GraphView({
         return Math.min(1, baseStr * 1.5); // ← 강도 +50%
       });
 
+    // A: 워밍업 반발력 대폭 강화
     const chargeWarm = forceManyBody()
-      .strength(n => (String(n.id).startsWith('pkg:') ? -80 : -60))  // ← 더 밀어냄
-      .distanceMin(30)
-      .distanceMax(360);
+      .strength(n => (String(n.id).startsWith('pkg:') ? -200 : -160))
+      .distanceMin(20)
+      .distanceMax(600);
 
     const collideWarm = forceCollide()
-      .radius(n => (String(n.id).startsWith('pkg:') ? 14 : 9) + 6)   // ← 반경 + 라벨 여유
+      .radius(n => (String(n.id).startsWith('pkg:') ? 16 : 11) + 14)
       .strength(1)
-      .iterations(4);
+      .iterations(5);
 
-    const radialWarm = forceRadial(radialRadiusFn, cx, cy).strength(0.08);
+    const radialWarm = forceRadial(radialRadiusFn, cx, cy).strength(n => n._tx != null ? 0 : 0.13);
+
+    // 패키지 트리 배치용 forceX/Y (트리 목표 좌표로 끌어당김, 클래스 레벨에서는 강도 0)
+    const treeX = forceX(n => n._tx != null ? n._tx : cx).strength(n => n._tx != null ? 0.14 : 0);
+    const treeY = forceY(n => n._ty != null ? n._ty : cy).strength(n => n._ty != null ? 0.14 : 0);
 
     // ★ 2) 오프스크린 워밍업
     const sim = forceSimulation(visNodes)
@@ -826,7 +939,41 @@ export default function GraphView({
       .force("charge", chargeWarm)
       .force("collide", collideWarm)
       .force("center", forceCenter(cx, cy))
-      .force("radial", radialWarm);
+      .force("radial", radialWarm)
+      .force("treeX", treeX)
+      .force("treeY", treeY);
+
+    // A: 같은 패키지 클래스끼리 모이게 하는 cohesion 힘 (class 레벨 전용)
+    const pkgGroups = new Map();
+    if (level === 'class') {
+      for (const n of visNodes) {
+        if (!isCls(n.id)) continue;
+        const pid = toPkgId(n.id);
+        if (!pid) continue;
+        if (!pkgGroups.has(pid)) pkgGroups.set(pid, []);
+        pkgGroups.get(pid).push(n.id);
+      }
+    }
+
+    const applyPackageCohesion = (k) => {
+      for (const [, ids] of pkgGroups) {
+        if (ids.length < 2) continue;
+        let pcx = 0, pcy = 0, cnt = 0;
+        for (const id of ids) {
+          const n = nodesById.get(id);
+          if (!n || !Number.isFinite(n.x)) continue;
+          pcx += n.x; pcy += n.y; cnt++;
+        }
+        if (cnt < 2) continue;
+        pcx /= cnt; pcy /= cnt;
+        for (const id of ids) {
+          const n = nodesById.get(id);
+          if (!n) continue;
+          n.vx += (pcx - n.x) * k;
+          n.vy += (pcy - n.y) * k;
+        }
+      }
+    };
 
     // 리프 스냅/허브 분산 헬퍼 함수
     const applyLeafSnap = (kPos) => {
@@ -884,42 +1031,81 @@ export default function GraphView({
       });
     };
 
-    // 워밍업 실행 (오프스크린)
-    const WARM_TICKS = 260;
+    // A: 워밍업 틱 수 증가 (260 → 500) — 더 완전한 정착
+    const WARM_TICKS = 500;
     sim.alpha(1).alphaDecay(1 - Math.pow(0.001, 1 / WARM_TICKS));
 
     for (let i = 0; i < WARM_TICKS; i++) {
-      applyLeafSnap(0.004);   // 워밍업 시 더 강하게
-      applyHubSpread(0.003);  // 워밍업 시 더 강하게
+      applyLeafSnap(0.004);
+      applyHubSpread(0.003);
+      applyPackageCohesion(0.008);  // A: 패키지 클러스터링 힘
       sim.tick();
     }
     sim.alpha(0); // 멈춤
 
-    // ★ 3) 런타임 힘으로 교체
+    // D: 바리센터 후처리 — 각 노드를 이웃들의 평균 위치로 이동 → 교차 감소
+    // 이웃이 많은 노드일수록 더 "중간 위치"로 당겨져 선이 짧아지고 교차가 줄어듦
+    {
+      const BARY_ITER = 8;
+      const BARY_BLEND = 0.22;
+      for (let iter = 0; iter < BARY_ITER; iter++) {
+        // 이번 iter의 이동량을 별도 배열에 계산 (동시 이동 — 순서 영향 없애기)
+        const dx = new Float32Array(visNodes.length);
+        const dy = new Float32Array(visNodes.length);
+        visNodes.forEach((n, i) => {
+          const neighbors = [...(nbr.get(n.id) || [])];
+          if (neighbors.length === 0) return;
+          let bx = 0, by = 0, cnt = 0;
+          for (const nid of neighbors) {
+            const nb = nodesById.get(nid);
+            if (!nb || !Number.isFinite(nb.x)) continue;
+            bx += nb.x; by += nb.y; cnt++;
+          }
+          if (cnt === 0) return;
+          dx[i] = (bx / cnt - n.x) * BARY_BLEND;
+          dy[i] = (by / cnt - n.y) * BARY_BLEND;
+        });
+        // 일괄 적용 (동시성 보장)
+        visNodes.forEach((n, i) => { n.x += dx[i]; n.y += dy[i]; });
+      }
+    }
+
+    // 워밍업 결과 기준 뷰포트 자동 피팅
+    {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const n of visNodes) {
+        if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) continue;
+        if (n.x < x0) x0 = n.x; if (n.x > x1) x1 = n.x;
+        if (n.y < y0) y0 = n.y; if (n.y > y1) y1 = n.y;
+      }
+      if (Number.isFinite(x0)) {
+        const pad = 80;
+        const w = canvas.clientWidth, h = canvas.clientHeight;
+        const nw = x1 - x0 + pad * 2, nh = y1 - y0 + pad * 2;
+        const k = Math.min(w / nw, h / nh, 1.4);
+        tr.current = { k, x: (w - (x1 + x0) * k) / 2, y: (h - (y1 + y0) * k) / 2 };
+      }
+    }
+
+    // ★ 3) 런타임 힘으로 교체 — 워밍업이 좋은 배치를 만들었으므로 낮은 alpha로 시작
     sim
-      .force("link", linkForce)       // 기존 값
-      .force("charge", chargeForce)   // 기존 값(차수별 -40~-88)
-      .force("collide", collideForce) // 라벨 반경 충돌
-      .force("radial", radial)        // 기존 라디얼(0.07)
+      .force("link", linkForce)
+      .force("charge", chargeForce)
+      .force("collide", collideForce)
+      .force("radial", radial)
+      .force("treeX", treeX)
+      .force("treeY", treeY)
       .alphaTarget(0)
-      .alpha(0.3)
-      .alphaDecay(0.02)
+      .alpha(0.06)       // 0.3 → 0.06: 워밍업 후 미세 조정만
+      .alphaDecay(0.04)  // 0.02 → 0.04: 빠르게 안정화
       .restart();
 
     sim.on("tick", () => {
       if (!runningRef.current) return;
-      // 트리 레이아웃: 목표 좌표로 약하게 끌어당김
-      for (const n of visNodes) {
-        if (n._tx !== undefined && n._ty !== undefined) {
-          n.vx += (n._tx - n.x) * 0.0015;
-          n.vy += (n._ty - n.y) * 0.0015;
-        }
-      }
-
-      // 런타임: 약한 힘으로 유지
-      applyLeafSnap(0.003);   // 평소 값
-      applyHubSpread(0.002);  // 평소 값
-
+      const a = Math.min(1, sim.alpha() * 8);
+      applyLeafSnap(0.003 * a);
+      applyHubSpread(0.002 * a);
+      applyPackageCohesion(0.003 * a);  // A: 런타임에도 패키지 집합 유지
       draw();
     });
     sim.on("end", draw);
@@ -955,11 +1141,11 @@ export default function GraphView({
     const mouseDown = (e) => {
       const pos = getMousePos(e);
 
-      // Find clicked node
+      // Find clicked node — nodeR 기반 정확한 경계 감지
       const clickedNode = visNodes.find(node => {
         const dx = pos.x - (node.x || 0);
         const dy = pos.y - (node.y || 0);
-        return Math.sqrt(dx * dx + dy * dy) < 15;
+        return Math.sqrt(dx * dx + dy * dy) < nodeR(node) + 4 / tr.current.k;
       });
 
       if (clickedNode) {
@@ -969,7 +1155,7 @@ export default function GraphView({
         dragNodeRef.current = clickedNode;
         clickedNode.fx = clickedNode.x;
         clickedNode.fy = clickedNode.y;
-        sim.alphaTarget(0.05).restart();  // 0.3 → 0.05로 낮춰서 부드럽게
+        sim.alphaTarget(0.02).restart();  // 드래그 중 미세 재계산만
       } else {
         // Click on empty space - deselect
         setSelectedNodeId(null);
@@ -988,6 +1174,20 @@ export default function GraphView({
         tr.current.x = e.clientX - dragStart.x;
         tr.current.y = e.clientY - dragStart.y;
         draw();
+      } else {
+        // Hover 감지 — 연결 서브그래프 즉시 하이라이트 (Obsidian 핵심 인터랙션)
+        const pos = getMousePos(e);
+        const hovered = visNodes.find(n => {
+          const dx = pos.x - (n.x || 0);
+          const dy = pos.y - (n.y || 0);
+          return Math.sqrt(dx * dx + dy * dy) < nodeR(n) + 6 / tr.current.k;
+        });
+        const newId = hovered ? hovered.id : null;
+        if (hoverNodeRef.current !== newId) {
+          hoverNodeRef.current = newId;
+          canvas.style.cursor = newId ? 'pointer' : 'grab';
+          requestAnimationFrame(draw);
+        }
       }
     };
 
@@ -1009,7 +1209,7 @@ export default function GraphView({
       const clickedNode = visNodes.find(node => {
         const dx = pos.x - (node.x || 0);
         const dy = pos.y - (node.y || 0);
-        return Math.sqrt(dx * dx + dy * dy) < 15;
+        return Math.sqrt(dx * dx + dy * dy) < nodeR(node) + 4 / tr.current.k;
       });
 
       if (clickedNode && onNodeClick) {
@@ -1239,47 +1439,47 @@ export default function GraphView({
         )}
       </div>
 
-      {/* 하단 범례 */}
+      {/* 하단 범례 — 노드 오버레이 + 엣지 타입 색상 (hover/선택 시 표시) */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        gap: '1rem',
-        padding: '0.75rem 1rem',
+        gap: '0.75rem',
+        padding: '0.6rem 1rem',
         backgroundColor: '#0F141A',
-        borderTop: '1px solid #30363d',
-        fontSize: '0.8rem'
+        borderTop: '1px solid #1e2a3a',
+        fontSize: '0.75rem',
+        flexWrap: 'wrap'
       }}>
-        <div style={{ color: '#c9d1d9' }}>범례:</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-          <div style={{ 
-            width: '12px', 
-            height: '12px', 
-            backgroundColor: '#10b981', 
-            borderRadius: '2px' 
-          }} />
-          <span style={{ color: '#c9d1d9' }}>추가</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-          <div style={{ 
-            width: '12px', 
-            height: '12px', 
-            backgroundColor: '#f59e0b', 
-            borderRadius: '2px' 
-          }} />
-          <span style={{ color: '#c9d1d9' }}>수정</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-          <div style={{ 
-            width: '12px', 
-            height: '12px', 
-            backgroundColor: '#6b7280', 
-            borderRadius: '2px',
-            opacity: 0.6
-          }} />
-          <span style={{ color: '#c9d1d9' }}>삭제</span>
-        </div>
-        <div style={{ marginLeft: 'auto', color: '#6b7280' }}>
-          더블클릭: 메인 패널에서 열기 | 드래그: 노드 이동 | 휠: 줌 | 좌클릭 배경 드래그: 팬
+        <span style={{ color: '#4b5563', fontWeight: 600, letterSpacing: '0.05em' }}>NODE</span>
+        {[
+          { color: '#60a5fa', label: '클래스' },
+          { color: '#818cf8', label: '패키지' },
+          { color: '#10b981', label: '추가' },
+          { color: '#f59e0b', label: '수정' },
+          { color: '#94a3b8', label: '삭제' },
+        ].map(({ color, label }) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: color, boxShadow: `0 0 4px ${color}` }} />
+            <span style={{ color: '#6b7280' }}>{label}</span>
+          </div>
+        ))}
+        <span style={{ color: '#4b5563', fontWeight: 600, letterSpacing: '0.05em', marginLeft: '0.5rem' }}>EDGE (hover)</span>
+        {[
+          { color: 'rgba(34,211,238,0.8)',  label: 'implements', dash: '6 3' },
+          { color: 'rgba(251,191,36,0.8)',  label: 'extends' },
+          { color: 'rgba(96,165,250,0.8)',  label: 'calls' },
+          { color: 'rgba(167,139,250,0.8)', label: 'references', dash: '3 3' },
+          { color: 'rgba(52,211,153,0.8)',  label: 'belongs_to' },
+        ].map(({ color, label, dash }) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <svg width="18" height="8" style={{ overflow: 'visible' }}>
+              <line x1="0" y1="4" x2="18" y2="4" stroke={color} strokeWidth="1.5" strokeDasharray={dash} />
+            </svg>
+            <span style={{ color: '#6b7280' }}>{label}</span>
+          </div>
+        ))}
+        <div style={{ marginLeft: 'auto', color: '#374151', fontSize: '0.7rem' }}>
+          hover: 서브그래프 강조 | 더블클릭: 패널 열기 | drag: 이동 | wheel: 줌
         </div>
       </div>
     </div>
