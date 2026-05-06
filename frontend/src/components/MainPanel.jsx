@@ -36,11 +36,11 @@ function ClassCard({
   onToggleCollapse = () => {},
 }) {
   const ring = classOverlay === OverlayChangeKind.ADDED
-    ? "ring-2 ring-emerald-500"
+    ? "ring-2 ring-teal-400"
     : classOverlay === OverlayChangeKind.MODIFIED
-    ? "ring-2 ring-amber-500"
+    ? "ring-2 ring-purple-400"
     : classOverlay === OverlayChangeKind.REMOVED
-    ? "ring-2 ring-slate-400 opacity-70"
+    ? "ring-2 ring-red-400 opacity-70"
     : "";
 
   return (
@@ -242,16 +242,19 @@ function MethodRow({
     : m.visibility === 'protected' ? '#f59e0b'
     : m.visibility === 'private'   ? '#6b7280'
     : '#60a5fa'; // package-private
-  const badgeColor = overlay === OverlayChangeKind.ADDED    ? "#10b981"
-    : overlay === OverlayChangeKind.MODIFIED ? "#f59e0b"
-    : overlay === OverlayChangeKind.REMOVED  ? "#6b7280"
-    : visibilityColor;
+  // 점(dot)은 항상 접근자 색 유지
+  const badgeColor = visibilityColor;
   const removed = overlay === OverlayChangeKind.REMOVED;
-  // LOC 히트맵: 20줄 이하 = 없음, ~50줄 = 약한 주황, 50줄 초과 = 주황
+  // overlay는 왼쪽 스트라이프로 표시
+  const overlayStripe = overlay === OverlayChangeKind.ADDED    ? '#2dd4bf'
+    : overlay === OverlayChangeKind.MODIFIED ? '#c084fc'
+    : overlay === OverlayChangeKind.REMOVED  ? '#f87171'
+    : null;
+  // LOC 히트맵: overlay 활성 시 비활성, 평소엔 파랑 계열 tint
   const loc = m.loc || 0;
-  const locTint = loc <= 20 ? 'transparent'
-    : loc <= 50 ? 'rgba(245,158,11,0.04)'
-    : 'rgba(245,158,11,0.09)';
+  const locTint = overlay || loc <= 20 ? 'transparent'
+    : loc <= 50 ? 'rgba(96,165,250,0.04)'
+    : 'rgba(96,165,250,0.09)';
 
   return (
     <div
@@ -259,7 +262,8 @@ function MethodRow({
         position: 'relative',
         borderRadius: '10px',
         border: selected ? '1.5px solid #58a6ff' : '1px solid #21262d',
-        backgroundColor: selected ? '#0d1117' : locTint,
+        borderLeft: overlayStripe ? `3px solid ${overlayStripe}` : (selected ? '1.5px solid #58a6ff' : '1px solid #21262d'),
+        backgroundColor: overlayStripe ? `${overlayStripe}0d` : (selected ? '#0d1117' : locTint),
         padding: '0.625rem 0.75rem',
         fontSize: '0.8125rem',
         cursor: removed ? 'default' : 'pointer',
@@ -308,9 +312,6 @@ function MethodRow({
           borderRadius: '50%',
           backgroundColor: badgeColor,
           flexShrink: 0,
-          boxShadow: overlay !== OverlayChangeKind.REMOVED
-            ? `0 0 0 2px ${badgeColor}20`
-            : 'none'
         }} />
         <span style={{
           fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
@@ -319,7 +320,7 @@ function MethodRow({
           flex: 1,
           lineHeight: '1.4'
         }}>
-          {m.collapsed ? (m.preview ?? m.sig + " { ... }") : m.sig}
+          {m.collapsed ? (m.preview ?? m.sig + " { ... }") : (m.uiLabel ?? m.sig)}
         </span>
       </div>
 
@@ -506,15 +507,11 @@ export default function MainPanel({
   // Selection mode state - renamed to multi
   const [multi, setMulti] = useState(false);
   const [selected, setSelected] = useState(new Set());
-  const [batchSubmitting, setBatchSubmitting] = useState(false);
 
   // baseline은 props가 있으면 props 사용, 없으면 내부 state 사용
   const baseline = propBaseline !== undefined ? propBaseline : internalBaseline;
   const setBaseline = onBaselineChange || setInternalBaseline;
 
-  // 체크포인트 목록 상태
-  const [baselineOptions, setBaselineOptions] = useState(["Working"]);
-  const [loadingBaselines, setLoadingBaselines] = useState(false);
 
   // editMode가 꺼질 때 multi=false와 selected.clear() 자동 초기화
   useEffect(() => {
@@ -544,27 +541,6 @@ export default function MainPanel({
   };
 
   // 체크포인트 목록 로드
-  const loadBaselines = async () => {
-    setLoadingBaselines(true);
-    try {
-      const res = await fetch(`${getApiBase()}/main/checkpoints`, { method: "GET" });
-      if (!res.ok) throw new Error(`GET /main/checkpoints ${res.status}`);
-      const json = await res.json();
-      // 다양한 응답 형태 대응
-      const list = Array.isArray(json)
-        ? json
-        : Array.isArray(json.items)
-          ? json.items.map(x => x.id || x.checkpointId || x.name).filter(Boolean)
-          : [];
-      setBaselineOptions(["Working", ...list]);
-    } catch (e) {
-      console.warn("체크포인트 목록 로드 실패:", e);
-      setBaselineOptions(["Working"]); // 실패 시 기본값만
-    } finally {
-      setLoadingBaselines(false);
-    }
-  };
-
   // Load layout data (SWR 방식 - 기존 데이터 유지)
   const loadLayout = async () => {
     try {
@@ -575,10 +551,10 @@ export default function MainPanel({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          projectId: "default",        // 서버 기본값과 맞추세요
+          projectId: "default",
           maxMethodLines: 20,
           withRelations: true,
-          baseline: baseline || "working"      // 현재 선택값
+          ...(baseline ? { baseline } : {})
         })
       });
       
@@ -608,56 +584,6 @@ export default function MainPanel({
       }
       return newSet;
     });
-  };
-
-  // Clear all selections
-  const clearSelection = () => {
-    setSelected(new Set());
-  };
-
-  // Build batch payload for selected anchors
-  const buildBatchPayload = (projectId, diffs, selected) => {
-    const patches = [...selected]
-      .filter(anchor => diffs[anchor])
-      .map(anchor => ({
-        anchor: anchor,
-        allowedOps: ["EDIT_METHOD_BODY", "ADD_IMPORT"],
-        patch: { format: "unified", diff: diffs[anchor] }
-      }));
-    return { projectId, mode: "atomic", patches };
-  };
-
-  // Handle batch apply with AI-generated diffs
-  const handleBatchApply = async (projectId, diffs) => {
-    const payload = buildBatchPayload(projectId, diffs, selected);
-    if (payload.patches.length === 0) {
-      alert("선택된 항목에 사용할 diff가 없습니다.");
-      return;
-    }
-    
-    setBatchSubmitting(true);
-    
-    try {
-      const response = await fetch(`${getApiBase()}/main/apply`, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload),
-      });
-      
-      const result = await response.json();
-      
-      // Show toast/alert with results
-      const successCount = result.stats.ok;
-      const failedCount = result.stats.failed;
-      alert(`일괄 적용 완료: 성공 ${successCount} / 실패 ${failedCount} (${result.mode} 모드)`);
-      
-      // 위반 처리와 레이아웃 갱신은 SSE에서 자동으로 처리됨
-      
-    } catch (error) {
-      alert(`일괄 적용 실패: ${error.message}`);
-    } finally {
-      setBatchSubmitting(false);
-    }
   };
 
   // Load line diff for modified methods
@@ -746,37 +672,6 @@ export default function MainPanel({
     }
   };
 
-  // Restore from snapshot
-  const handleRestore = async (mode = 'dry-run') => {
-    if (!baseline) {
-      alert('복원할 베이스라인을 선택하세요');
-      return;
-    }
-
-    try {
-      const response = await fetch(`${getApiBase()}/main/checkpoints/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId: 'default',
-          checkpointId: baseline,
-          mode
-        })
-      });
-      
-      const result = await response.json();
-      
-      if (mode === 'dry-run') {
-        alert(`미리보기:\n변경될 파일 수: ${Object.keys(result.preview?.forward?.changes || {}).length}`);
-      } else {
-        alert(`복원 완료: ${result.restoredTo}`);
-        loadLayout(); // Reload after restore
-      }
-    } catch (err) {
-      alert(`복원 실패: ${err.message}`);
-    }
-  };
-
   // Jump to method from diagnostics
   const jumpTo = async (anchor, file, line) => {
     if (!anchor) return;
@@ -848,30 +743,54 @@ export default function MainPanel({
   };
 
 
-  // Build overlay maps
-  const { classOverlayMap, methodOverlayMap } = useMemo(() => {
+  // Build overlay maps + ghost methods (removed)
+  // 서버 포맷: { changes: [{anchor, kind, ...}, ...] } (배열)
+  const { classOverlayMap, methodOverlayMap, ghostsByClass } = useMemo(() => {
     const classMap = new Map();
     const methodMap = new Map();
-    
-    if (data?.overlay?.changes) {
-      Object.entries(data.overlay.changes).forEach(([file, change]) => {
-        if (change.classes) {
-          Object.entries(change.classes).forEach(([className, classChange]) => {
-            classMap.set(className, classChange.kind);
-            
-            if (classChange.methods) {
-              Object.entries(classChange.methods).forEach(([methodSig, methodChange]) => {
-                const methodId = `m:${className}.${methodSig}`;
-                methodMap.set(methodId, methodChange.kind);
+    const ghosts = {}; // className → ghost method 배열
+
+    const changes = data?.overlay?.changes;
+    if (!Array.isArray(changes)) return { classOverlayMap: classMap, methodOverlayMap: methodMap, ghostsByClass: ghosts };
+
+    const kindPriority = { added: 0, modified: 1, removed: 2 };
+
+    changes.forEach(({ anchor, kind }) => {
+      if (!anchor || !kind) return;
+      methodMap.set(anchor, kind);
+
+      if (anchor.startsWith("m:")) {
+        const withoutM = anchor.slice(2);
+        const spaceIdx = withoutM.indexOf(' ');
+        if (spaceIdx > 0) {
+          const fqcnAndReturn = withoutM.slice(0, spaceIdx);
+          const lastDot = fqcnAndReturn.lastIndexOf('.');
+          if (lastDot > 0) {
+            const fqcn = fqcnAndReturn.slice(0, lastDot);
+            const className = fqcn.split('.').pop();
+            const existing = classMap.get(className);
+            if (existing === undefined || kindPriority[kind] < kindPriority[existing]) {
+              classMap.set(className, kind);
+            }
+            // removed → 트리에 유령 메서드로 추가
+            if (kind === "removed") {
+              const sig = withoutM.slice(lastDot + 1); // "ReturnType methodName(params)"
+              if (!ghosts[className]) ghosts[className] = [];
+              ghosts[className].push({
+                id: anchor, sig, uiLabel: `${className}.${sig}`,
+                aiId: anchor, visibility: 'public', static: false,
+                loc: 0, collapsed: false,
+                preview: `${sig} { /* 삭제됨 */ }`,
+                range: { start: [0, 0], end: [0, 0] }
               });
             }
-          });
+          }
         }
-      });
-    }
-    
-    return { classOverlayMap: classMap, methodOverlayMap: methodMap };
-  }, [data.overlay]);
+      }
+    });
+
+    return { classOverlayMap: classMap, methodOverlayMap: methodMap, ghostsByClass: ghosts };
+  }, [data?.overlay]);
 
   // Debounced refresh to prevent excessive updates
   const refreshLayoutDebounced = useMemo(() => {
@@ -887,10 +806,6 @@ export default function MainPanel({
     loadLayout();
   }, [baseline]);
 
-  // 컴포넌트 마운트 시 체크포인트 목록 로드
-  useEffect(() => {
-    loadBaselines();
-  }, []);
 
   // Register refresh function
   useEffect(() => {
@@ -1085,38 +1000,6 @@ export default function MainPanel({
           스냅샷
         </button>
         
-        {baseline && (
-          <>
-            <button 
-              onClick={() => handleRestore('dry-run')}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#3d3d3d',
-                color: '#c9d1d9',
-                border: '1px solid #30363d',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '0.9rem'
-              }}
-            >
-              미리보기
-            </button>
-            <button 
-              onClick={() => handleRestore('apply')}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#d97706',
-                color: 'white',
-                border: '1px solid #f59e0b',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '0.9rem'
-              }}
-            >
-              원복
-            </button>
-          </>
-        )}
         
         <button 
           onClick={loadLayout}
@@ -1226,99 +1109,24 @@ export default function MainPanel({
               AI 수정(선택)
             </button>
             
-            <button disabled={!selected.size} onClick={async () => {
-                      alert(`ZIP 내보내기: ${selected.size}개 항목`);
-                    }}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      fontSize: '0.8rem',
-                      backgroundColor: selected.size > 0 ? '#16a34a' : '#374151',
-                      color: selected.size > 0 ? 'white' : '#9ca3af',
-                      border: '1px solid #30363d',
-                      borderRadius: '4px',
-                      cursor: selected.size > 0 ? 'pointer' : 'not-allowed',
-                      opacity: selected.size > 0 ? 1 : 0.6
-                    }}>
-              ZIP 내보내기
-            </button>
-
-            <button disabled={!selected.size || batchSubmitting} onClick={async () => {
-                      const mockDiffs = {};
-                      [...selected].forEach(anchor => {
-                        mockDiffs[anchor] = `--- a/TestFile.java\n+++ b/TestFile.java  \n@@ -1,3 +1,4 @@\n public void testMethod() {\n+    // AI-generated improvement\n     System.out.println("Hello");\n }`;
-                      });
-                      
-                      await handleBatchApply("default", mockDiffs);
-                    }}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      fontSize: '0.8rem',
-                      backgroundColor: (selected.size > 0 && !batchSubmitting) ? '#dc2626' : '#374151',
-                      color: (selected.size > 0 && !batchSubmitting) ? 'white' : '#9ca3af',
-                      border: '1px solid #30363d',
-                      borderRadius: '4px',
-                      cursor: (selected.size > 0 && !batchSubmitting) ? 'pointer' : 'not-allowed',
-                      opacity: (selected.size > 0 && !batchSubmitting) ? 1 : 0.6
-                    }}>
-              {batchSubmitting ? '적용 중...' : '일괄 적용'}
-            </button>
-
-            <button disabled={!selected.size} onClick={() => {
-                      alert(`되돌리기: ${selected.size}개 항목`);
-                    }}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      fontSize: '0.8rem',
-                      backgroundColor: selected.size > 0 ? '#f59e0b' : '#374151',
-                      color: selected.size > 0 ? 'white' : '#9ca3af',
-                      border: '1px solid #30363d',
-                      borderRadius: '4px',
-                      cursor: selected.size > 0 ? 'pointer' : 'not-allowed',
-                      opacity: selected.size > 0 ? 1 : 0.6
-                    }}>
-              되돌리기
-            </button>
           </div>
         )}
 
-        {/* 베이스라인 선택 드롭다운 */}
-        <div style={{ marginLeft: 'auto', display:'flex', alignItems:'center', gap: '0.5rem' }}>
-          <span style={{ fontSize:'0.9rem', color:'#6b7280' }}>Baseline:</span>
-          <select
-            value={baseline || 'Working'}
-            onChange={(e) => {
-              const next = e.target.value;
-              setBaseline(next === 'Working' ? '' : next); // '' = 워킹 디렉토리
-              // 선택 즉시 레이아웃 새로고침
-              setTimeout(loadLayout, 0);
-            }}
-            style={{
-              background:'#0f172a', color:'#e5e7eb',
-              border:'1px solid #334155', borderRadius:6, padding:'6px 8px'
-            }}
-          >
-            {baselineOptions.map(opt => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
-          <button
-            onClick={loadBaselines}
-            title="목록 새로고침"
-            disabled={loadingBaselines}
-            style={{ padding:'6px 8px', border:'1px solid #334155', borderRadius:6,
-                     background:'#1e293b', color:'#e5e7eb', opacity: loadingBaselines ? .6 : 1 }}
-          >⟳</button>
-          {baseline && (
+        {/* baseline 표시 (Log 패널에서 자동 설정됨) */}
+        {baseline && (
+          <div style={{ marginLeft: 'auto', display:'flex', alignItems:'center', gap:'0.5rem' }}>
+            <span style={{ fontSize:'0.8rem', color:'#6b7280' }}>비교 기준:</span>
+            <span style={{ fontSize:'0.8rem', color:'#60a5fa', fontFamily:'monospace' }}>
+              {baseline}
+            </span>
             <button
-              onClick={() => handleRestore('apply')}
-              title="선택한 백업본으로 즉시 전환"
-              style={{ padding:'6px 10px', border:'1px solid #f59e0b',
-                       borderRadius:6, background:'#d97706', color:'#fff' }}
-            >
-              전환
-            </button>
-          )}
-        </div>
+              onClick={() => setBaseline(undefined)}
+              style={{ fontSize:'0.75rem', color:'#6b7280', background:'transparent',
+                       border:'none', cursor:'pointer', padding:'2px 4px' }}
+              title="비교 해제"
+            >✕</button>
+          </div>
+        )}
       </div>
 
 
@@ -1338,12 +1146,20 @@ export default function MainPanel({
         {methodFilter && (
           <button onClick={() => setMethodFilter('')} style={{ background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: '1rem', padding: '0 4px' }}>✕</button>
         )}
-        <span style={{ fontSize: '0.75rem', color: '#4b5563', flexShrink: 0 }}>
-          <span style={{ color: '#10b981' }}>●</span> public &nbsp;
-          <span style={{ color: '#f59e0b' }}>●</span> protected &nbsp;
-          <span style={{ color: '#6b7280' }}>●</span> private &nbsp;
-          <span style={{ color: '#60a5fa' }}>●</span> package
-        </span>
+        {baseline ? (
+          <span style={{ fontSize: '0.75rem', color: '#4b5563', flexShrink: 0 }}>
+            <span style={{ color: '#2dd4bf' }}>●</span> 추가 &nbsp;
+            <span style={{ color: '#c084fc' }}>●</span> 수정 &nbsp;
+            <span style={{ color: '#f87171' }}>●</span> 삭제
+          </span>
+        ) : (
+          <span style={{ fontSize: '0.75rem', color: '#4b5563', flexShrink: 0 }}>
+            <span style={{ color: '#10b981' }}>●</span> public &nbsp;
+            <span style={{ color: '#f59e0b' }}>●</span> protected &nbsp;
+            <span style={{ color: '#6b7280' }}>●</span> private &nbsp;
+            <span style={{ color: '#60a5fa' }}>●</span> package
+          </span>
+        )}
       </div>
 
       {/* Main Content Area */}
@@ -1393,9 +1209,14 @@ export default function MainPanel({
               </div>
               {(pkg?.classes || []).map((cls) => {
                 const q = methodFilter.toLowerCase();
+                // ghost(삭제된) 메서드를 클래스 목록 끝에 추가
+                const allMethods = [
+                  ...(cls.methods || []),
+                  ...(ghostsByClass[cls.name] || [])
+                ];
                 const filteredMethods = q
-                  ? (cls.methods || []).filter(m => m.sig.toLowerCase().includes(q))
-                  : cls.methods;
+                  ? allMethods.filter(m => (m.uiLabel ?? m.sig).toLowerCase().includes(q))
+                  : allMethods;
                 if (q && filteredMethods.length === 0) return null;
                 const clsData = { ...cls, methods: filteredMethods };
                 return (

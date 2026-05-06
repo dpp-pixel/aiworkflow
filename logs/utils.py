@@ -11,13 +11,14 @@ from typing import Optional, Dict, Any
 
 
 def get_db_path() -> str:
-    """
-    데이터베이스 경로 가져오기
-    """
-    # app.py에서 사용하는 경로와 동일하게
-    workspace = Path(__file__).parent.parent / "test_workspace"
-    db_path = workspace.parent / ".contextpanel" / "context.db"
-    return str(db_path)
+    """데이터베이스 경로 가져오기 (WORKSPACE 기반)"""
+    try:
+        from main.utils import WORKSPACE
+        if WORKSPACE:
+            return str(Path(WORKSPACE) / ".contextpanel" / "context.db")
+    except Exception:
+        pass
+    return str(Path(__file__).parent.parent / ".contextpanel" / "context.db")
 
 
 def get_conn():
@@ -148,6 +149,15 @@ def log_ai_plan(
         title=title,
         details=json.dumps(details, ensure_ascii=False, indent=2)
     )
+
+
+def log_file_change(path: str, kind: str, diff: Optional[str] = None) -> int:
+    """파일 변경 이벤트 기록 (watcher에서 호출)"""
+    kind_label = {"created": "생성", "modified": "수정", "deleted": "삭제"}.get(kind, kind)
+    title = f"{kind_label}: {path}"
+    details = json.dumps({"path": path, "kind": kind, "diff": diff[:5000] if diff else None},
+                         ensure_ascii=False)
+    return add_log_entry(type="file_changed", title=title, details=details)
 
 
 def get_recent_logs(limit: int = 10, type_filter: Optional[str] = None):

@@ -2,7 +2,7 @@
 from pathlib import Path
 import re
 from typing import Dict, Any, List, Tuple
-from .anchor_utils import anchor_pkg, anchor_cls, anchor_field, anchor_method, normalize_method_signature
+from .anchor_utils import anchor_pkg, anchor_cls, anchor_field, anchor_method, normalize_method_signature, ui_anchor, ai_anchor
 
 # 정규식 패턴들
 PKG_RE = re.compile(r"^\s*package\s+([a-zA-Z0-9_$.]+)\s*;", re.M)
@@ -258,6 +258,8 @@ def index_workspace(workspace: Path) -> Dict[str, Any]:
                 method_summary = {
                     "id": method_id,
                     "sig": normalized_sig,
+                    "uiLabel": ui_anchor(class_name, sig),
+                    "aiId": ai_anchor(package, class_name, sig),
                     "visibility": _extract_visibility(sig),
                     "static": bool(re.search(r'\bstatic\b', sig)),
                     "loc": loc,

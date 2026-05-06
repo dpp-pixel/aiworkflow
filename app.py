@@ -172,6 +172,7 @@ def root():
 
 app.state.workspace = None
 app.state.db_path = None
+app.state.current_checkpoint = None
 
 @app.on_event("startup")
 async def restore_last_workspace():

@@ -2,168 +2,107 @@ import React, { useState, useEffect, useRef } from "react";
 import MainPanel from "./components/MainPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
 
-const SPLIT = (window).__SPLIT_CONTEXT__ === true;
-// ContextPanel은 분리 모드일 때 import 자체를 생략(번들 사이즈↓)
-const ContextPanel = SPLIT ? null : React.lazy(() => import("./components/ContextPanel.jsx"));
-
 const API = (window).__API_BASE__ ?? "";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("main");
+  const [mainView, setMainView] = useState("tree");
   const [baseline, setBaseline] = useState(undefined);
   const [graphLevel, setGraphLevel] = useState("class");
 
-  // 자동 새로고침 함수들
   const mainRefreshRef = useRef(() => {});
-  const contextRefreshRef = useRef(() => {});
   const graphRefreshRef = useRef(() => {});
 
-  // SSE 연결 및 자동 새로고침
+  // Log 패널에서 체크포인트 클릭 시 baseline 자동 설정
   useEffect(() => {
-    console.log("[SSE] 연결 시도:", `${API}/main/events`);
-    const es = new EventSource(`${API}/main/events`);
+    const onBaselineChanged = (e) => setBaseline(e.detail?.checkpointId || undefined);
+    const onRestored = () => setBaseline(undefined); // 복원 후 비교 해제
+    window.addEventListener("baseline-changed", onBaselineChanged);
+    window.addEventListener("checkpoint-restored", onRestored);
+    return () => {
+      window.removeEventListener("baseline-changed", onBaselineChanged);
+      window.removeEventListener("checkpoint-restored", onRestored);
+    };
+  }, []);
 
-    // 500ms 쓰로틀링
+  useEffect(() => {
+    const es = new EventSource(`${API}/main/events`);
     let pending = false;
     const trigger = () => {
       if (pending) return;
       pending = true;
       setTimeout(() => {
-        console.log("[SSE] 자동 새로고침 실행");
         mainRefreshRef.current?.();
         graphRefreshRef.current?.();
         pending = false;
       }, 500);
     };
-
     es.addEventListener("message", (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        console.log("[SSE] 메시지 수신:", data);
-        if (data?.type === "index_updated" || data?.type === "full_reindex") {
-          trigger();
-        }
-      } catch (e) {
-        console.warn("[SSE] 메시지 파싱 오류:", e);
-      }
+        if (data?.type === "index_updated" || data?.type === "full_reindex") trigger();
+      } catch (e) {}
     });
-
-    es.addEventListener("ping", (ev) => {
-      const data = JSON.parse(ev.data);
-      console.log("[SSE] ping:", data.status);
-    });
-
-    es.onerror = (err) => {
-      console.warn("[SSE] 연결 오류:", err);
-    };
-
-    return () => {
-      console.log("[SSE] 연결 종료");
-      es.close();
-    };
+    es.onerror = () => {};
+    return () => es.close();
   }, []);
 
-  // 그래프 관련 함수 제거 - GraphView 컴포넌트에서 처리
+  const tabBtn = (view, label) => (
+    <button
+      onClick={() => setMainView(view)}
+      style={{
+        padding: "4px 14px",
+        fontSize: "0.8rem",
+        backgroundColor: mainView === view ? "#21262d" : "transparent",
+        color: mainView === view ? "#e6edf3" : "#6b7280",
+        border: "none",
+        borderBottom: mainView === view ? "2px solid #2563eb" : "2px solid transparent",
+        cursor: "pointer",
+        fontWeight: mainView === view ? "600" : "normal"
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
-    <div style={{
-      height: '100vh',
-      width: '100%',
-      display: 'flex',
-      flexDirection: 'column',
-      backgroundColor: '#0B0F12',
-      color: '#E6EDF3'
-    }}>
-      {/* Tab Navigation */}
+    <div style={{ height: "100%", width: "100%", display: "flex", flexDirection: "column",
+      backgroundColor: "#0b0f12", color: "#e6edf3" }}>
+
+      {/* Tree / Graph 토글 */}
       <div style={{
-        display: 'flex',
-        borderBottom: '2px solid #30363d',
-        backgroundColor: '#0F141A'
+        display: "flex", alignItems: "center",
+        borderBottom: "1px solid #21262d",
+        backgroundColor: "#0f141a",
+        paddingLeft: "8px",
+        flexShrink: 0
       }}>
-        <button
-          onClick={() => setActiveTab("main")}
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: activeTab === "main" ? '#21262d' : 'transparent',
-            color: activeTab === "main" ? '#E6EDF3' : '#9ca3af',
-            border: 'none',
-            borderBottom: activeTab === "main" ? '2px solid #2563eb' : '2px solid transparent',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            fontWeight: activeTab === "main" ? 'bold' : 'normal'
-          }}
-        >
-          Main Panel
-        </button>
-        <button
-          onClick={() => setActiveTab("graph")}
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: activeTab === "graph" ? '#21262d' : 'transparent',
-            color: activeTab === "graph" ? '#E6EDF3' : '#9ca3af',
-            border: 'none',
-            borderBottom: activeTab === "graph" ? '2px solid #2563eb' : '2px solid transparent',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            fontWeight: activeTab === "graph" ? 'bold' : 'normal'
-          }}
-        >
-          Graph View
-        </button>
-        {!SPLIT && (
-          <button
-            onClick={() => setActiveTab("context")}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: activeTab === "context" ? '#21262d' : 'transparent',
-              color: activeTab === "context" ? '#E6EDF3' : '#9ca3af',
-              border: 'none',
-              borderBottom: activeTab === "context" ? '2px solid #2563eb' : '2px solid transparent',
-              cursor: 'pointer',
-              fontSize: '0.9rem',
-              fontWeight: activeTab === "context" ? 'bold' : 'normal'
-            }}
-          >
-            Context
-          </button>
-        )}
+        {tabBtn("tree", "Tree")}
+        {tabBtn("graph", "Graph")}
       </div>
 
-      {/* Tab Content */}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        {activeTab === "main" && (
+      {/* 뷰 콘텐츠 */}
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {mainView === "tree" && (
           <MainPanel
             baseline={baseline}
             onBaselineChange={setBaseline}
             onRegisterRefresh={(fn) => { mainRefreshRef.current = fn; }}
           />
         )}
-        {activeTab === "graph" && (
-          <div style={{ padding: '1rem', height: '100%' }}>
+        {mainView === "graph" && (
+          <div style={{ padding: "1rem", height: "100%" }}>
             <GraphView
               projectId="default"
               level={graphLevel}
               baseline={baseline}
               onLevelChange={setGraphLevel}
               onNodeClick={(nodeId) => {
-                console.log('Graph node clicked:', nodeId);
-                // 1) 메인 탭으로 이동
-                setActiveTab("main");
-                // 2) 메인패널에 포커스 이벤트 전달(앵커 = nodeId)
-                window.dispatchEvent(new CustomEvent("focus-anchor", {
-                  detail: { anchor: nodeId }
-                }));
+                setMainView("tree");
+                window.dispatchEvent(new CustomEvent("focus-anchor", { detail: { anchor: nodeId } }));
               }}
               onRegisterRefresh={(fn) => { graphRefreshRef.current = fn; }}
             />
           </div>
-        )}
-        {!SPLIT && activeTab === "context" && ContextPanel && (
-          <React.Suspense fallback={<div>Context 로딩 중...</div>}>
-            <ContextPanel
-              onRegisterRefresh={(fn) => { contextRefreshRef.current = fn; }}
-            />
-          </React.Suspense>
         )}
       </div>
     </div>

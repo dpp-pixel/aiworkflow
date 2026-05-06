@@ -15,55 +15,51 @@ def _sha_bytes(b: bytes) -> str:
     """바이트 데이터의 SHA1 해시 생성"""
     return hashlib.sha1(b).hexdigest()
 
-def create_checkpoint(project_id: str, label: str = "manual") -> str:
+def create_checkpoint(project_id: str, label: str = "manual", parent_id: str | None = None) -> str:
     """
     현재 워크스페이스의 모든 파일을 체크포인트로 저장
-    
+
     Args:
         project_id: 프로젝트 ID
         label: 체크포인트 라벨
-        
+        parent_id: 부모 체크포인트 ID (트리 구조용)
+
     Returns:
         생성된 체크포인트 ID
     """
     ts = time.strftime("%Y%m%d_%H%M%S")
     ts_hash = hashlib.sha1(ts.encode()).hexdigest()[:4]
     cid = f"ckpt_{ts}_{ts_hash}"
-    
+
     files = []
     workspace_path = Path(WORKSPACE)
-    
-    # 워크스페이스의 모든 파일 수집 (.contextpanel 제외)
+
     for p in workspace_path.rglob("*"):
-        # .contextpanel 은 제외
-        if ".contextpanel" in p.parts: 
+        if ".contextpanel" in p.parts:
             continue
         if p.is_file():
             try:
                 b = p.read_bytes()
                 sha = _sha_bytes(b)
-                
-                # 블롭 저장 (해시의 처음 2자리로 디렉터리 분산)
+
                 blob_dir = BLOBS / sha[:2]
                 blob_dir.mkdir(exist_ok=True)
                 blob_path = blob_dir / sha
-                
-                # 이미 존재하지 않으면 저장 (중복 방지)
+
                 if not blob_path.exists():
                     blob_path.write_bytes(b)
-                
-                # 파일 정보 수집
+
                 files.append({"path": str(p.relative_to(WORKSPACE)).replace("\\","/"),
                               "sha": sha, "size": p.stat().st_size})
-                
+
             except Exception as e:
-                # 읽을 수 없는 파일은 건너뛰기
                 print(f"Warning: Could not read file {p}: {e}")
                 continue
-    
+
     manifest = {
         "id": cid, "projectId": project_id, "label": label,
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "parentId": parent_id,
         "files": files
     }
     (MANI/f"{cid}.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -81,11 +77,11 @@ def list_checkpoints(project_id: str | None = None) -> List[Dict[str, Any]]:
                 "projectId": m.get("projectId"),
                 "label": m.get("label"),
                 "createdAt": m.get("createdAt"),
+                "parentId": m.get("parentId"),
                 "fileCount": len(m.get("files", []))
             })
         except Exception:
             continue
-    # 최신순
     items.sort(key=lambda x: x["createdAt"], reverse=True)
     return items
 

@@ -1,9 +1,34 @@
 # main/watcher.py
 from __future__ import annotations
-import threading, time, asyncio
+import threading, asyncio, difflib, json
 from pathlib import Path
 from typing import Set
 from .utils import WORKSPACE
+
+def _compute_diff(rel_path: str, current_content: str) -> str | None:
+    """마지막 체크포인트 대비 unified diff 계산"""
+    try:
+        from .checkpoint_utils import list_checkpoints, BLOBS, MANI
+        checkpoints = list_checkpoints()
+        if not checkpoints:
+            return None
+        mani_path = MANI / f"{checkpoints[0]['id']}.json"
+        manifest = json.loads(mani_path.read_text(encoding="utf-8"))
+        for f in manifest.get("files", []):
+            if f["path"] == rel_path:
+                blob = BLOBS / f["sha"][:2] / f["sha"]
+                old = blob.read_text(encoding="utf-8", errors="ignore")
+                lines = list(difflib.unified_diff(
+                    old.splitlines(keepends=True),
+                    current_content.splitlines(keepends=True),
+                    fromfile=f"a/{rel_path}", tofile=f"b/{rel_path}", n=3
+                ))
+                result = "".join(lines)
+                return result[:5000] if result else None
+    except Exception:
+        pass
+    return None
+
 
 def _rel(p: Path) -> str:
     try:
@@ -32,16 +57,29 @@ def start_watcher() -> None:
                 paths: Set[str] = set()
                 for change_type, p in changes:
                     path_str = str(p)
-                    # .java 파일만 처리
-                    if not path_str.endswith(".java"): 
+                    if not path_str.endswith(".java"):
                         continue
-                    # build/, out/, .git/ 등 제외
-                    if any(exclude in path_str for exclude in ["/build/", "/out/", "/.git/", "\\build\\", "\\out\\", "\\.git\\"]):
+                    if any(ex in path_str for ex in ["/build/", "/out/", "/.git/", "\\build\\", "\\out\\", "\\.git\\"]):
                         continue
                     try:
                         rel_path = _rel(Path(p))
                         paths.add(rel_path)
                         print(f"[watcher] detected change: {change_type} {rel_path}")
+
+                        # 로그 기록
+                        try:
+                            from watchfiles import Change
+                            kind = {Change.added: "created", Change.modified: "modified",
+                                    Change.deleted: "deleted"}.get(change_type, "modified")
+                            diff = None
+                            if kind != "deleted" and Path(p).exists():
+                                content = Path(p).read_text(encoding="utf-8", errors="ignore")
+                                diff = _compute_diff(rel_path, content)
+                            from logs.utils import log_file_change
+                            log_file_change(rel_path, kind, diff)
+                        except Exception as le:
+                            print(f"[watcher] log error: {le}")
+
                     except Exception as e:
                         print(f"[watcher] error processing {p}: {e}")
                         continue

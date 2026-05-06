@@ -81,6 +81,7 @@ class DiagnoseReq(BaseModel):
 class CkptCreateReq(BaseModel):
     projectId: str
     label: str = "manual"
+    parentId: Optional[str] = None
 
 class RestoreReq(BaseModel):
     projectId: str
@@ -440,19 +441,18 @@ def get_checkpoints(projectId: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/checkpoints")
-def post_checkpoint(req: CkptCreateReq):
+def post_checkpoint(req: CkptCreateReq, request: Request):
     """
     새 체크포인트 생성
-    
-    Args:
-        req: CkptCreateReq - 체크포인트 생성 요청
-        
+
     Returns:
         {"checkpointId": str}
     """
     try:
         ensure_workspace()
-        cid = create_checkpoint(project_id=req.projectId, label=req.label)
+        parent_id = req.parentId or getattr(request.app.state, 'current_checkpoint', None)
+        cid = create_checkpoint(project_id=req.projectId, label=req.label, parent_id=parent_id)
+        request.app.state.current_checkpoint = cid
         return {"checkpointId": cid}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -560,13 +560,17 @@ def restore_checkpoint_endpoint(req: RestoreReq):
             return {"preview": {"forward": preview_forward, "backward": preview_backward}}
 
         # apply: 적용 직전 자동 스냅샷
-        before_id = create_checkpoint(project_id=req.projectId, label="auto-before-restore")
-        
+        before_id = create_checkpoint(project_id=req.projectId, label="auto-before-restore",
+                                      parent_id=getattr(request.app.state, 'current_checkpoint', None))
+
         # 실제 복구
         _restore_apply(manifest)
-        
+
+        # 복원 후 현재 체크포인트 갱신
+        request.app.state.current_checkpoint = req.checkpointId
+
         # 복원 후 검증(차이 0 이어야 정상)
-        after_overlay = compare_states(req.checkpointId, "working")  
+        after_overlay = compare_states(req.checkpointId, "working")
 
         return {
             "ok": True,
