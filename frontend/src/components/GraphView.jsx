@@ -109,9 +109,6 @@ export default function GraphView({
   const abortRef = useRef();
   const isDraggingNodeRef = useRef(false); // 노드 드래그 상태
   const hoverNodeRef = useRef(null);       // 마우스 오버 노드 (hover dim용)
-  // Path Finder 상태
-  const pathStateRef = useRef({ mode: false, source: null, target: null, nodes: new Set(), edgeKeys: new Set() });
-  const [pathUI, setPathUI] = useState({ mode: false, source: null, target: null, found: null, hops: null });
 
   // API 기본 주소 가져오기
   const getApiBase = () => {
@@ -516,49 +513,8 @@ export default function GraphView({
     });
     nbrRef.current = nbr;   // ← 최신 이웃 맵 보관
 
-    // BFS 경로 탐색 (undirected)
-    const bfsPath = (srcId, tgtId) => {
-      if (srcId === tgtId) return { nodes: new Set([srcId]), edgeKeys: new Set(), hops: 0 };
-      const adj = new Map();
-      for (const l of visLinks) {
-        const s = l.source?.id ?? l.source;
-        const t = l.target?.id ?? l.target;
-        if (!adj.has(s)) adj.set(s, []);
-        if (!adj.has(t)) adj.set(t, []);
-        adj.get(s).push({ to: t, link: l });
-        adj.get(t).push({ to: s, link: l });
-      }
-      const prev = new Map();
-      const visited = new Set([srcId]);
-      const queue = [srcId];
-      while (queue.length > 0) {
-        const curr = queue.shift();
-        if (curr === tgtId) break;
-        for (const { to, link } of (adj.get(curr) || [])) {
-          if (!visited.has(to)) {
-            visited.add(to); prev.set(to, { from: curr, link });
-            queue.push(to);
-          }
-        }
-      }
-      if (!prev.has(tgtId)) return null;
-      const nodes = new Set(); const edgeKeys = new Set(); let curr = tgtId; let hops = 0;
-      while (curr !== srcId) {
-        nodes.add(curr);
-        const { from, link } = prev.get(curr);
-        const s = link.source?.id ?? link.source; const t = link.target?.id ?? link.target;
-        edgeKeys.add(`${s}|${t}`); edgeKeys.add(`${t}|${s}`);
-        curr = from; hops++;
-      }
-      nodes.add(srcId);
-      return { nodes, edgeKeys, hops };
-    };
-
     // hover 또는 선택 노드 기준 — Obsidian처럼 비연결 노드는 매우 강하게 dim
     const alphaNode = (id) => {
-      // Path Finder 우선
-      const ps = pathStateRef.current;
-      if (ps.mode && ps.nodes.size > 0) return ps.nodes.has(id) ? 1 : 0.04;
       if (isDraggingNodeRef.current) return 1;
       const sel = selectedRef.current;
       const hov = hoverNodeRef.current;
@@ -571,11 +527,6 @@ export default function GraphView({
     };
 
     const alphaEdge = (sourceId, targetId) => {
-      // Path Finder 우선
-      const ps = pathStateRef.current;
-      if (ps.mode && ps.edgeKeys.size > 0) {
-        return (ps.edgeKeys.has(`${sourceId}|${targetId}`) || ps.edgeKeys.has(`${targetId}|${sourceId}`)) ? 1 : 0.03;
-      }
       if (isDraggingNodeRef.current) return 1;
       const sel = selectedRef.current;
       const hov = hoverNodeRef.current;
@@ -784,16 +735,7 @@ export default function GraphView({
           node.overlay === 'removed'  ? '#94a3b8' :
           isPkg(node.id)              ? '#818cf8' : '#60a5fa';
 
-        // Path Finder 색상 오버라이드
-        const ps = pathStateRef.current;
-        const pathColor =
-          ps.mode && ps.nodes.has(node.id)
-            ? (node.id === ps.source  ? '#10b981'  // 시작 노드: 초록
-             : node.id === ps.target  ? '#fbbf24'  // 끝 노드: 노랑
-             : '#06b6d4')                          // 경로 중간: 시안
-            : null;
-
-        const coreColor = pathColor ?? (isSelected ? '#fbbf24' : (isHovered ? '#e2e8f0' : hexColor));
+        const coreColor = isSelected ? '#fbbf24' : (isHovered ? '#e2e8f0' : hexColor);
 
         ctx.globalAlpha = nodeAlpha;
 
@@ -1206,33 +1148,6 @@ export default function GraphView({
         return Math.sqrt(dx * dx + dy * dy) < nodeR(node) + 4 / tr.current.k;
       });
 
-      // ── Path Finder 모드 클릭 처리 ──────────────────────────
-      if (pathStateRef.current.mode) {
-        if (!clickedNode) return;
-        const ps = pathStateRef.current;
-        if (!ps.source) {
-          // 첫 번째 클릭 = 시작 노드
-          ps.source = clickedNode.id; ps.target = null;
-          ps.nodes = new Set([clickedNode.id]); ps.edgeKeys = new Set();
-          setPathUI(u => ({ ...u, source: clickedNode.id, target: null, found: null, hops: null }));
-        } else {
-          // 두 번째 클릭 = 목표 노드 → BFS
-          ps.target = clickedNode.id;
-          const result = bfsPath(ps.source, clickedNode.id);
-          if (result) {
-            ps.nodes = result.nodes; ps.edgeKeys = result.edgeKeys;
-            setPathUI(u => ({ ...u, target: clickedNode.id, found: true, hops: result.hops }));
-          } else {
-            ps.nodes = new Set([ps.source, clickedNode.id]); ps.edgeKeys = new Set();
-            setPathUI(u => ({ ...u, target: clickedNode.id, found: false, hops: null }));
-          }
-          // 목표 노드를 새 시작점으로 (연속 탐색)
-          ps.source = clickedNode.id; ps.target = null;
-          setPathUI(u => ({ ...u, source: clickedNode.id, target: null }));
-        }
-        requestAnimationFrame(draw); return;
-      }
-
       if (clickedNode) {
         setSelectedNodeId(clickedNode.id);
         requestAnimationFrame(() => canvas.dispatchEvent(new CustomEvent('redraw')));
@@ -1480,42 +1395,7 @@ export default function GraphView({
           Reset Layout
         </button>
 
-        {/* Path Finder 토글 */}
-        <button
-          onClick={() => {
-            const next = !pathUI.mode;
-            pathStateRef.current = { mode: next, source: null, target: null, nodes: new Set(), edgeKeys: new Set() };
-            setPathUI({ mode: next, source: null, target: null, found: null, hops: null });
-            if (canvasRef.current) requestAnimationFrame(() => canvasRef.current.dispatchEvent(new CustomEvent('redraw')));
-          }}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: pathUI.mode ? '#0891b2' : '#374151',
-            color: pathUI.mode ? 'white' : '#9ca3af',
-            border: `1px solid ${pathUI.mode ? '#06b6d4' : '#30363d'}`,
-            borderRadius: '6px', cursor: 'pointer', fontSize: '0.9rem',
-            boxShadow: pathUI.mode ? '0 0 8px rgba(6,182,212,0.4)' : 'none'
-          }}
-        >
-          🔍 Path Finder
-        </button>
-
-        {/* Path Finder 상태 표시 */}
-        {pathUI.mode && (
-          <div style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem', borderRadius: '6px',
-            backgroundColor: '#0c1a2e', border: '1px solid #0e4f6b', color: '#67e8f9' }}>
-            {!pathUI.source
-              ? '시작 노드를 클릭하세요'
-              : pathUI.found === null
-              ? <>🟢 <b>{pathUI.source?.split(':').pop()?.split('.').pop()}</b> → 목표 노드를 클릭</>
-              : pathUI.found
-              ? <>🟢 → 🟡 경로 발견 ({pathUI.hops}홉)</>
-              : <>⚠️ 경로 없음</>
-            }
-          </div>
-        )}
-
-        {!pathUI.mode && selectedNodeId && (
+        {selectedNodeId && (
           <div style={{ marginLeft: 'auto', fontSize: '0.9rem', color: '#c9d1d9' }}>
             선택됨: {selectedNodeId}
           </div>
@@ -1594,9 +1474,7 @@ export default function GraphView({
           </div>
         ))}
         <div style={{ marginLeft: 'auto', color: '#374151', fontSize: '0.7rem' }}>
-          {pathUI.mode
-            ? '🟢 시작 | 🔵 경로 | 🟡 목표 — 클릭으로 경로 탐색'
-            : 'hover: 서브그래프 강조 | 더블클릭: 패널 열기 | drag: 이동 | wheel: 줌'}
+          hover: 서브그래프 강조 | 더블클릭: 패널 열기 | drag: 이동 | wheel: 줌
         </div>
       </div>
     </div>
