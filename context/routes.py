@@ -29,6 +29,7 @@ class PrepareReq(BaseModel):
     exclude_hashes: list[str] = []
     use_model_tokenizer: bool = False
     model: str | None = "gemini-2.0-flash"
+    instruction: str = ""
 
 # ==== /context/preview ====
 @router.post("/preview")
@@ -122,7 +123,8 @@ def context_prepare(req: PrepareReq, request: Request):
                 packet_parts.append(f"## [{role}] {rel(path)} > {s['title']}\n\n{s.get('content', '')}\n")
 
     expand(req.primary, "primary"); expand(req.reference, "reference")
-    raw_packet = "\n---\n".join(packet_parts)
+    instruction_block = f"## [instruction]\n\n{req.instruction.strip()}\n\n---\n\n" if req.instruction.strip() else ""
+    raw_packet = instruction_block + "\n---\n".join(packet_parts)
     found = _secret_count(raw_packet)
 
     if req.mask:
@@ -195,6 +197,14 @@ def recipes_list(request: Request):
             items.append({"name": j.get("name") or os.path.splitext(f.name)[0], "created_at": j.get("created_at"), "file": f.path})
         except: pass
     return items
+
+@router.delete("/recipes/{name}")
+def recipes_delete(name: str, request: Request):
+    state = request.app.state
+    path = os.path.join(_recipes_dir(state), f"{_sanitize_name(name)}.json")
+    if not os.path.exists(path): raise HTTPException(404, "recipe not found")
+    os.remove(path)
+    return {"ok": True}
 
 @router.get("/recipes/load")
 def recipes_load(name: str, request: Request):

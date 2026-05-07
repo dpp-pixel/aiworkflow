@@ -51,7 +51,7 @@ def split_md_sections(text: str) -> list[dict]:
                 content_str = '\n'.join(current_content).strip()
                 if content_str:
                     content_only = '\n'.join(current_content[1:]).strip() if len(current_content) > 1 else ""
-                    sections.append({"title": current_title, "content": content_only, "hash": sha256(content_str), "token_guess": len(content_str.split())})
+                    sections.append({"title": current_title, "content": content_only, "hash": sha256(content_str), "token_guess": approx_tokens(content_str)})
             current_title = m.group(2); current_content = [line]
         else:
             current_content.append(line)
@@ -59,7 +59,7 @@ def split_md_sections(text: str) -> list[dict]:
         content_str = '\n'.join(current_content).strip()
         if content_str:
             content_only = '\n'.join(current_content[1:]).strip() if len(current_content) > 1 else ""
-            sections.append({"title": current_title, "content": content_only, "hash": sha256(content_str), "token_guess": len(content_str.split())})
+            sections.append({"title": current_title, "content": content_only, "hash": sha256(content_str), "token_guess": approx_tokens(content_str)})
     return sections
 
 def read_text(path: str) -> str:
