@@ -34,6 +34,7 @@ function ClassCard({
   onToggleSelect = () => {},
   collapsed = false,
   onToggleCollapse = () => {},
+  viewMode = "tree",
 }) {
   const ring = classOverlay === OverlayChangeKind.ADDED
     ? "ring-2 ring-teal-400"
@@ -144,6 +145,7 @@ function ClassCard({
               multi={multi}
               selected={selected.has(m.id)}
               onToggleSelect={() => onToggleSelect(m.id)}
+              viewMode={viewMode}
             />
           ))}
         </div>
@@ -236,15 +238,55 @@ function highlightJava(line) {
 
 function MethodRow({
   m, overlay, onExpand, expanded, highlightLine, onAi, diffHunks, editMode, highlight,
-  multi = false, selected = false, onToggleSelect = () => {}
+  multi = false, selected = false, onToggleSelect = () => {}, viewMode = "tree"
 }) {
   const visibilityColor = m.visibility === 'public'    ? '#10b981'
     : m.visibility === 'protected' ? '#f59e0b'
     : m.visibility === 'private'   ? '#6b7280'
     : '#60a5fa'; // package-private
-  // 점(dot)은 항상 접근자 색 유지
   const badgeColor = visibilityColor;
   const removed = overlay === OverlayChangeKind.REMOVED;
+
+  // ── Signatures 모드: 컴팩트 한 줄 렌더링 ──
+  if (viewMode === "signatures") {
+    return (
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', gap: '0.4rem',
+          padding: '0.25rem 0.4rem', borderRadius: '5px',
+          border: selected ? '1px solid #2563eb' : '1px solid transparent',
+          backgroundColor: selected ? '#1e3a8a15' : 'transparent',
+          cursor: removed ? 'default' : 'pointer',
+          opacity: removed ? 0.5 : 1,
+        }}
+        onClick={() => !removed && onExpand()}
+      >
+        <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: visibilityColor, flexShrink: 0, display: 'inline-block' }} />
+        <span style={{ fontFamily: 'ui-monospace, monospace', color: '#c9d1d9', flex: 1, fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {m.sig || m.uiLabel}
+        </span>
+        {m.loc > 0 && (
+          <span style={{ color: '#374151', fontSize: '0.68rem', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {m.loc}L · ~{Math.round(m.loc * 7).toLocaleString()}tok
+          </span>
+        )}
+        <button
+          title={m.id}
+          onClick={(e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(m.id);
+            e.currentTarget.textContent = '✓';
+            setTimeout(() => { e.currentTarget.textContent = '⎘'; }, 900);
+          }}
+          style={{ padding: '0.1rem 0.25rem', background: 'none', border: 'none', color: '#4b5563', cursor: 'pointer', fontSize: '0.7rem', flexShrink: 0 }}
+        >⎘</button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onAi(); }}
+          style={{ padding: '0.1rem 0.35rem', fontSize: '0.68rem', backgroundColor: '#238636', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
+        >✨</button>
+      </div>
+    );
+  }
   // overlay는 왼쪽 스트라이프로 표시
   const overlayStripe = overlay === OverlayChangeKind.ADDED    ? '#2dd4bf'
     : overlay === OverlayChangeKind.MODIFIED ? '#c084fc'
@@ -340,6 +382,15 @@ function MethodRow({
         className="group-hover:opacity-100"
         onClick={(e) => e.stopPropagation()}
       >
+        <button
+          title={m.id}
+          onClick={(e) => {
+            navigator.clipboard.writeText(m.id);
+            e.currentTarget.textContent = '✓';
+            setTimeout(() => { e.currentTarget.textContent = '⎘'; }, 900);
+          }}
+          style={{ padding: '0.375rem 0.5rem', fontSize: '0.75rem', backgroundColor: '#21262d', color: '#6b7280', border: '1px solid #30363d', borderRadius: '5px', cursor: 'pointer' }}
+        >⎘</button>
         <button
           onClick={onAi}
           style={{
@@ -507,6 +558,7 @@ export default function MainPanel({
   // Selection mode state - renamed to multi
   const [multi, setMulti] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [viewMode, setViewMode] = useState("tree"); // "tree" | "signatures"
 
   // baseline은 props가 있으면 props 사용, 없으면 내부 state 사용
   const baseline = propBaseline !== undefined ? propBaseline : internalBaseline;
@@ -791,6 +843,20 @@ export default function MainPanel({
 
     return { classOverlayMap: classMap, methodOverlayMap: methodMap, ghostsByClass: ghosts };
   }, [data?.overlay]);
+
+  // 선택된 메서드의 토큰 추정 (Java 1줄 ≈ 7토큰)
+  const selectedTokenEstimate = useMemo(() => {
+    if (!selected.size) return 0;
+    let total = 0;
+    for (const pkg of (data?.packages || [])) {
+      for (const cls of (pkg.classes || [])) {
+        for (const m of (cls.methods || [])) {
+          if (selected.has(m.id)) total += Math.round((m.loc || 10) * 7);
+        }
+      }
+    }
+    return total;
+  }, [selected, data]);
 
   // Debounced refresh to prevent excessive updates
   const refreshLayoutDebounced = useMemo(() => {
@@ -1090,10 +1156,12 @@ export default function MainPanel({
                      }} />
               멀티선택
             </label>
-            <span style={{
-              fontSize: '0.8rem',
-              color: '#6b7280'
-            }}>선택 {selected.size}개</span>
+            <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>선택 {selected.size}개</span>
+            {selected.size > 0 && (
+              <span style={{ fontSize: '0.75rem', color: '#4b5563' }}>
+                ~{selectedTokenEstimate.toLocaleString()} tok
+              </span>
+            )}
 
             <button disabled={!selected.size} onClick={() => setAiTargets([...selected])}
                     style={{
@@ -1132,6 +1200,16 @@ export default function MainPanel({
 
       {/* 메서드 필터 검색창 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', backgroundColor: '#0F141A', border: '1px solid #30363d', borderRadius: '6px' }}>
+        {/* Tree / Signatures 뷰 토글 */}
+        <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
+          {[["tree", "Tree"], ["signatures", "Sig"]].map(([v, label]) => (
+            <button key={v} onClick={() => setViewMode(v)} style={{
+              padding: '0.15rem 0.5rem', fontSize: '0.72rem', borderRadius: '4px', border: 'none',
+              backgroundColor: viewMode === v ? '#2563eb' : '#21262d',
+              color: viewMode === v ? 'white' : '#6b7280', cursor: 'pointer'
+            }}>{label}</button>
+          ))}
+        </div>
         <span style={{ fontSize: '0.85rem', color: '#6b7280', flexShrink: 0 }}>🔍</span>
         <input
           type="text"
@@ -1239,6 +1317,7 @@ export default function MainPanel({
                   onToggleSelect={toggleSelection}
                   collapsed={collapsedCls.has(cls.name)}
                   onToggleCollapse={(e) => { e?.stopPropagation?.(); toggleCls(cls.name); }}
+                  viewMode={viewMode}
                 />
                 );
               })}
