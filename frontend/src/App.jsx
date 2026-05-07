@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import MainPanel from "./components/MainPanel.jsx";
 import GraphView from "./components/GraphView.jsx";
+import AIProviderModal from "./components/AIProviderModal.jsx";
 
 const API = (window).__API_BASE__ ?? "";
 
@@ -8,6 +9,7 @@ export default function App() {
   const [mainView, setMainView] = useState("tree");
   const [baseline, setBaseline] = useState(undefined);
   const [graphLevel, setGraphLevel] = useState("class");
+  const [showAISettings, setShowAISettings] = useState(false);
 
   const mainRefreshRef = useRef(() => {});
   const graphRefreshRef = useRef(() => {});
@@ -78,7 +80,19 @@ export default function App() {
       }}>
         {tabBtn("tree", "Tree")}
         {tabBtn("graph", "Graph")}
+        <button
+          onClick={() => setShowAISettings(true)}
+          title="AI 제공자 설정"
+          style={{
+            marginLeft: "auto", marginRight: "4px",
+            background: "transparent", border: "none",
+            color: "#6b7280", cursor: "pointer",
+            fontSize: "1rem", padding: "4px 8px",
+            lineHeight: 1
+          }}
+        >⚙</button>
       </div>
+      {showAISettings && <AIProviderModal onClose={() => setShowAISettings(false)} />}
 
       {/* 뷰 콘텐츠 */}
       <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>

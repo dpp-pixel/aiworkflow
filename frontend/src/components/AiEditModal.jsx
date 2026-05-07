@@ -18,6 +18,15 @@ export default function AiEditModal({
   const [msg, setMsg] = useState(undefined);
   const [err, setErr] = useState(undefined);
   const [violations, setViolations] = useState(null);
+  const [aiProvider, setAiProvider] = useState(null); // 현재 설정된 제공자
+
+  // 현재 AI 제공자 로드
+  useEffect(() => {
+    fetch(`${API}/settings`)
+      .then(r => r.json())
+      .then(d => setAiProvider(d?.ai?.provider ?? "ollama"))
+      .catch(() => setAiProvider("ollama"));
+  }, []);
 
   // Set selected anchor when modal opens
   useEffect(() => {
@@ -142,27 +151,35 @@ ${item?.text || ""}
     }
   };
 
-  // 자동 탭: 외부 AI 서버로 전송
+  // 자동 탭: 통합 AI 완성 엔드포인트 호출
   const sendToServer = async () => {
-    setMsg(undefined);
-    setErr(undefined);
+    setMsg(undefined); setErr(undefined); setJob(null);
     try {
-      const r = await fetch(`${API}/main/ai/jobs`, {
+      const r = await fetch(`${API}/main/ai/complete`, {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ 
-          projectId: "default", 
-          anchors, 
-          baseline: baseline || "working", 
-          contextLines: 3 
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "default",
+          anchors,
+          baseline: baseline || "working",
+          contextLines: 3,
         })
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j?.detail || j?.error || "submit failed");
-      setJob({ id: j.jobId, status: j.status });
-      setMsg(`작업이 제출되었습니다: ${j.jobId}`);
-    } catch (e) { 
-      setErr(e.message); 
+      if (!r.ok) throw new Error(j?.detail || j?.error || "요청 실패");
+
+      if (j.type === "sync") {
+        // OpenAI / Ollama — 즉시 diff 반환
+        setDiff(j.diff || "");
+        setMsg(`완료 (${j.provider} / ${j.model})`);
+        setMode("manual"); // diff 탭으로 전환해 바로 적용 가능하게
+      } else if (j.type === "async") {
+        // External 콜백 — 기존 폴링 유지
+        setJob({ id: j.jobId, status: j.status });
+        setMsg(`작업 제출됨: ${j.jobId}`);
+      }
+    } catch (e) {
+      setErr(e.message);
     }
   };
 
@@ -334,44 +351,34 @@ ${item?.text || ""}
           </div>
         )}
 
-        {/* 탭 선택 */}
-        {window.__EXTERNAL_AI__ && (
-          <div style={{
-            marginBottom: "16px",
-            display: "flex",
-            gap: "8px",
-            borderBottom: "1px solid #243244"
-          }}>
-            <button
-              onClick={() => setMode("manual")}
-              style={{
-                padding: "0.5rem 1rem",
-                backgroundColor: mode === "manual" ? "#3b82f6" : "transparent",
-                color: mode === "manual" ? "white" : "#9ca3af",
-                border: "none",
-                borderBottom: mode === "manual" ? "2px solid #3b82f6" : "2px solid transparent",
-                cursor: "pointer",
-                fontSize: "0.9rem"
-              }}
-            >
-              수동
-            </button>
-            <button
-              onClick={() => setMode("auto")}
-              style={{
-                padding: "0.5rem 1rem",
-                backgroundColor: mode === "auto" ? "#3b82f6" : "transparent",
-                color: mode === "auto" ? "white" : "#9ca3af",
-                border: "none",
-                borderBottom: mode === "auto" ? "2px solid #3b82f6" : "2px solid transparent",
-                cursor: "pointer",
-                fontSize: "0.9rem"
-              }}
-            >
-              자동
-            </button>
-          </div>
-        )}
+        {/* 탭 선택 + 제공자 뱃지 */}
+        <div style={{ marginBottom: "16px", display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid #243244" }}>
+          <button onClick={() => setMode("manual")} style={{
+            padding: "0.5rem 1rem",
+            backgroundColor: "transparent",
+            color: mode === "manual" ? "white" : "#9ca3af",
+            border: "none",
+            borderBottom: mode === "manual" ? "2px solid #3b82f6" : "2px solid transparent",
+            cursor: "pointer", fontSize: "0.9rem"
+          }}>수동</button>
+          <button onClick={() => setMode("auto")} style={{
+            padding: "0.5rem 1rem",
+            backgroundColor: "transparent",
+            color: mode === "auto" ? "white" : "#9ca3af",
+            border: "none",
+            borderBottom: mode === "auto" ? "2px solid #3b82f6" : "2px solid transparent",
+            cursor: "pointer", fontSize: "0.9rem"
+          }}>자동</button>
+          {aiProvider && (
+            <span style={{
+              marginLeft: "auto", fontSize: "0.75rem", padding: "0.15rem 0.5rem",
+              backgroundColor: "#21262d", border: "1px solid #30363d",
+              borderRadius: "10px", color: "#9ca3af"
+            }}>
+              ● {aiProvider === "ollama" ? "Ollama" : aiProvider === "openai" ? "OpenAI" : "External"}
+            </span>
+          )}
+        </div>
 
         {pack && mode === "manual" && (
           <>

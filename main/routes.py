@@ -796,6 +796,189 @@ async def ai_callback(request: Request):
     return {"ok": True}
 
 
+# ---- 통합 AI 완성 엔드포인트 ----
+
+_DIFF_SYSTEM_PROMPT = (
+    "You are a Java code editor. "
+    "When given Java source code and an instruction, apply the change and return ONLY a unified diff. "
+    "Format: --- a/path/to/File.java / +++ b/path/to/File.java / @@ hunks. "
+    "Include 3 lines of context around changes. "
+    "Do not reformat or change unrelated code. "
+    "Output the diff only, no explanation."
+)
+
+def _extract_diff(text: str) -> str:
+    """AI 응답에서 unified diff 블록 추출."""
+    import re
+    # ```diff 또는 ``` 블록 안에 있으면 추출
+    m = re.search(r"```(?:diff)?\n(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # --- a/ 로 시작하는 라인부터 끝까지 추출
+    m = re.search(r"(---\s+a/.+)", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text.strip()
+
+@router.post("/ai/complete")
+def ai_complete(body: dict = Body(...)):
+    """
+    설정된 AI 제공자로 코드 완성(diff 생성) 요청.
+    Input:  { projectId, anchors[], baseline?, contextLines?, instruction? }
+    Output:
+      Sync  → { type:"sync",  diff:"...", provider, model }
+      Async → { type:"async", jobId:"...", status:"running" }
+    """
+    import sys, os as _os
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from app import load_cfg
+
+    cfg = load_cfg()
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "ollama")
+
+    project_id = body.get("projectId", "default")
+    anchors = body.get("anchors") or []
+    baseline = body.get("baseline", "working")
+    ctx = int(body.get("contextLines", 3))
+    instruction = body.get("instruction", "Improve this method.")
+
+    if not anchors:
+        raise HTTPException(400, "anchors required")
+
+    pack = build_snippet_pack(project_id, anchors, ctx, baseline)
+    code = pack["items"][0]["text"] if pack.get("items") else ""
+    anchor = anchors[0]
+
+    user_msg = f"Anchor: {anchor}\nInstruction: {instruction}\n\n```java\n{code}\n```"
+
+    # ── OpenAI ──────────────────────────────────────────────
+    if provider == "openai":
+        api_key = ai_cfg.get("openai_key", "")
+        model = ai_cfg.get("openai_model", "gpt-4o")
+        if not api_key:
+            raise HTTPException(400, "OpenAI API key not configured")
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [
+                    {"role": "system", "content": _DIFF_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg}
+                ]},
+                timeout=60
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+            return {"type": "sync", "diff": _extract_diff(raw), "provider": "openai", "model": model}
+        except requests.RequestException as e:
+            raise HTTPException(502, f"OpenAI API error: {e}")
+
+    # ── Ollama (HTTP API) ────────────────────────────────────
+    elif provider == "ollama":
+        ollama_url = ai_cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
+        model = ai_cfg.get("ollama_model", "qwen2.5-coder:7b")
+        try:
+            resp = requests.post(
+                f"{ollama_url}/api/chat",
+                json={"model": model, "stream": False, "messages": [
+                    {"role": "system", "content": _DIFF_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg}
+                ]},
+                timeout=120
+            )
+            resp.raise_for_status()
+            raw = resp.json()["message"]["content"]
+            return {"type": "sync", "diff": _extract_diff(raw), "provider": "ollama", "model": model}
+        except requests.RequestException as e:
+            raise HTTPException(502, f"Ollama error: {e}")
+
+    # ── External (기존 콜백 시스템) ──────────────────────────
+    elif provider == "external":
+        ext_url = ai_cfg.get("external_url", "") or _os.getenv("EXTERNAL_AI_URL", "")
+        ext_key = ai_cfg.get("external_key", "") or _os.getenv("EXTERNAL_AI_KEY", "")
+        if not ext_url:
+            raise HTTPException(400, "External AI URL not configured")
+
+        job_id = uuid4().hex
+        with AI_LOCK:
+            AI_JOBS[job_id] = {"id": job_id, "status": "queued", "anchors": anchors,
+                               "projectId": project_id, "createdAt": int(time.time())}
+
+        pub_base = ai_cfg.get("public_base_url", "") or _os.getenv("PUBLIC_BASE_URL", "")
+        callback_url = f"{pub_base.rstrip('/')}/main/ai/callback"
+        payload = {"jobId": job_id, "anchors": anchors, "baseline": baseline,
+                   "rules": ["EDIT_METHOD_BODY", "ADD_IMPORT"],
+                   "callbackUrl": callback_url,
+                   "callbackSecret": _os.getenv("AI_CALLBACK_SECRET", "dev-secret")}
+        import io, zipfile, json as _json
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("prompt.json", _json.dumps(payload, ensure_ascii=False, indent=2))
+            for i, it in enumerate(pack.get("items", []), 1):
+                safe = it["anchor"].replace(":", "_").replace(" ", "_").replace("/", "_")
+                z.writestr(f"snippets/{i:02d}_{safe}.java", it["text"])
+        buf.seek(0)
+        headers = {"Authorization": f"Bearer {ext_key}"} if ext_key else {}
+        try:
+            requests.post(f"{ext_url.rstrip('/')}/jobs",
+                          headers=headers, files={"bundle": ("bundle.zip", buf.getvalue(), "application/zip")},
+                          data={"jobId": job_id}, timeout=30)
+            with AI_LOCK:
+                AI_JOBS[job_id]["status"] = "running"
+        except Exception as e:
+            with AI_LOCK:
+                AI_JOBS[job_id]["status"] = "failed"
+                AI_JOBS[job_id]["error"] = str(e)
+        return {"type": "async", "jobId": job_id, "status": AI_JOBS[job_id]["status"]}
+
+    else:
+        raise HTTPException(400, f"Unknown provider: {provider}")
+
+
+@router.get("/ai/test")
+def ai_test():
+    """현재 설정된 AI 제공자 연결 테스트."""
+    import sys, time as _time
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from app import load_cfg
+
+    cfg = load_cfg()
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "ollama")
+    t0 = _time.time()
+
+    try:
+        if provider == "ollama":
+            url = ai_cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
+            r = requests.get(f"{url}/api/tags", timeout=5)
+            r.raise_for_status()
+            models = [m["name"] for m in r.json().get("models", [])]
+            return {"ok": True, "provider": "ollama", "latency_ms": int((_time.time()-t0)*1000), "models": models}
+
+        elif provider == "openai":
+            key = ai_cfg.get("openai_key", "")
+            if not key:
+                return {"ok": False, "provider": "openai", "error": "API key not set"}
+            r = requests.get("https://api.openai.com/v1/models",
+                             headers={"Authorization": f"Bearer {key}"}, timeout=10)
+            r.raise_for_status()
+            return {"ok": True, "provider": "openai", "latency_ms": int((_time.time()-t0)*1000)}
+
+        elif provider == "external":
+            url = ai_cfg.get("external_url", "").rstrip("/")
+            if not url:
+                return {"ok": False, "provider": "external", "error": "External URL not set"}
+            r = requests.get(f"{url}/health", timeout=5)
+            r.raise_for_status()
+            return {"ok": True, "provider": "external", "latency_ms": int((_time.time()-t0)*1000)}
+
+    except Exception as e:
+        return {"ok": False, "provider": provider, "error": str(e)}
+
+    return {"ok": False, "provider": provider, "error": "Unknown provider"}
+
+
 # ---- 내부 AI 분석 (Ollama) ----
 from .analyze_runner import run_ollama_analyze, analyze_class
 import sys

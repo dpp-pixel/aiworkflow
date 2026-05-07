@@ -117,9 +117,19 @@ _DEFAULT_CFG = {
     "last_workspace": None,
     "default_mask": True,
     "auto_scan": True,
-    "persist_mcp_key": True,  # 원하면 False로 바꿔도 됨
-    "api_key": None,          # persist_mcp_key가 True일 때만 저장
-    "ui": {"theme": "light"}
+    "persist_mcp_key": True,
+    "api_key": None,
+    "ui": {"theme": "light"},
+    "ai": {
+        "provider": "ollama",           # "ollama" | "openai" | "external"
+        "ollama_url": "http://localhost:11434",
+        "ollama_model": "qwen2.5-coder:7b",
+        "openai_key": "",
+        "openai_model": "gpt-4o",
+        "external_url": "",
+        "external_key": "",
+        "public_base_url": "",
+    }
 }
 
 def load_cfg() -> dict:
@@ -279,6 +289,7 @@ class SettingsUpdate(BaseModel):
     auto_scan: bool | None = None
     persist_mcp_key: bool | None = None
     ui: dict | None = None
+    ai: dict | None = None
 
 # ---- Routes ----
 @app.get("/healthz")
@@ -286,28 +297,49 @@ def healthz():
     return {"ok": True}
 
 # === 설정 가져오기/저장 API ===
+def _mask_key(key: str) -> str:
+    if not key or len(key) < 8:
+        return key
+    return key[:7] + "****"
+
 @app.get("/settings")
 def get_settings():
     cfg = load_cfg()
-    # 실행 중 API 키가 있으면(워크스페이스 설정 시 생성됨) 보여줌
     if getattr(app.state, "api_key", None):
         cfg["api_key"] = app.state.api_key if cfg.get("persist_mcp_key") else None
+    # OpenAI 키는 마스킹해서 반환 (프론트에 실제 키 노출 방지)
+    if cfg.get("ai", {}).get("openai_key"):
+        import copy
+        cfg = copy.deepcopy(cfg)
+        cfg["ai"]["openai_key"] = _mask_key(cfg["ai"]["openai_key"])
     return cfg
 
 @app.post("/settings")
 def update_settings(body: SettingsUpdate):
     cfg = load_cfg()
     for k, v in body.dict(exclude_none=True).items():
-        cfg[k] = v
-    # persist_mcp_key가 False면 저장본의 api_key는 null 처리
+        if k == "ai":
+            # ai 블록은 기존 값과 병합 (openai_key 마스킹 값 들어오면 기존 값 유지)
+            existing_ai = cfg.get("ai", {})
+            new_ai = {**existing_ai, **v}
+            incoming_key = v.get("openai_key", "")
+            if incoming_key.endswith("****"):
+                new_ai["openai_key"] = existing_ai.get("openai_key", "")
+            cfg["ai"] = new_ai
+        else:
+            cfg[k] = v
     if cfg.get("persist_mcp_key") is False:
         cfg["api_key"] = None
     else:
-        # 현재 세션 키를 저장(있을 때만)
         if getattr(app.state, "api_key", None):
             cfg["api_key"] = app.state.api_key
     save_cfg(cfg)
-    return {"ok": True, "settings": cfg}
+    # 응답에도 마스킹 적용
+    import copy
+    out = copy.deepcopy(cfg)
+    if out.get("ai", {}).get("openai_key"):
+        out["ai"]["openai_key"] = _mask_key(out["ai"]["openai_key"])
+    return {"ok": True, "settings": out}
 
 @app.get("/workspace/browse")
 def browse_directory(path: str = ""):
