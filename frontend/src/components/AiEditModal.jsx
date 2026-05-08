@@ -22,7 +22,7 @@ export default function AiEditModal({ open, onClose, anchors, baseline, file, on
   const [selected, setSelected]   = useState("");
   const [instruction, setInstruction] = useState("");
   const [showCode, setShowCode]   = useState(false);
-  const [mode, setMode]           = useState("external"); // "external" | "internal"
+  const [mode, setMode]           = useState("internal"); // "external" | "internal"
   const [diff, setDiff]           = useState("");
   const [sending, setSending]     = useState(false);
   const [applyRes, setApplyRes]   = useState(null);
@@ -225,8 +225,8 @@ ${code}
               color: mode === v ? "white" : "#6b7280", cursor: "pointer", fontSize: "0.875rem"
             }}>{label}</button>
           ))}
-          <span style={{ marginLeft: "auto", fontSize: "0.72rem", padding: "0.1rem 0.5rem", backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "8px", color: "#94a3b8" }}>
-            ● {providerLabel}
+          <span style={{ marginLeft: "auto", fontSize: "0.75rem", padding: "0.2rem 0.5rem", backgroundColor: "#1e293b", border: "1px solid #334155", borderRadius: "8px", color: "#94a3b8" }}>
+            {aiProvider === "ollama" ? "● 기본 (Ollama)" : "● 외부"}
           </span>
         </div>
 

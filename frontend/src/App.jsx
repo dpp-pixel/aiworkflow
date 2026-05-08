@@ -17,7 +17,7 @@ export default function App() {
   // Log 패널에서 체크포인트 클릭 시 baseline 자동 설정
   useEffect(() => {
     const onBaselineChanged = (e) => setBaseline(e.detail?.checkpointId || undefined);
-    const onRestored = () => setBaseline(undefined); // 복원 후 비교 해제
+    const onRestored = () => setBaseline(undefined);
     window.addEventListener("baseline-changed", onBaselineChanged);
     window.addEventListener("checkpoint-restored", onRestored);
     return () => {
