@@ -129,6 +129,7 @@ _DEFAULT_CFG = {
         "external_url": "",
         "external_key": "",
         "public_base_url": "",
+        "system_prompt": "",            # 비워두면 기본값 사용
     }
 }
 

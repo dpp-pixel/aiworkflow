@@ -11,6 +11,8 @@ const PROVIDERS = [
 const OPENAI_MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
 
 export default function AIProviderModal({ onClose }) {
+  const DEFAULT_SYSTEM_PROMPT = "You are a Java code editor. Return ONLY a unified diff.\nFormat: --- a/path/to/File.java / +++ b/path/to/File.java / @@ hunks\nInclude 3 lines of context. Do not reformat unrelated code.";
+
   const [ai, setAi] = useState({
     provider: "ollama",
     ollama_url: "http://localhost:11434",
@@ -20,6 +22,7 @@ export default function AIProviderModal({ onClose }) {
     external_url: "",
     external_key: "",
     public_base_url: "",
+    system_prompt: "",
   });
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
@@ -163,6 +166,28 @@ export default function AIProviderModal({ onClose }) {
                   placeholder="http://your-server:8001" />
               </Field>
             </div>
+          )}
+        </div>
+
+        {/* 시스템 프롬프트 커스텀 */}
+        <div style={{ marginBottom: "1rem" }}>
+          <Field label={`시스템 프롬프트 (비워두면 기본값 사용)`}>
+            <textarea
+              value={ai.system_prompt}
+              onChange={e => set("system_prompt", e.target.value)}
+              placeholder={DEFAULT_SYSTEM_PROMPT}
+              rows={4}
+              style={{
+                ...inp(), resize: "vertical", lineHeight: "1.5",
+                fontFamily: "ui-monospace, monospace", fontSize: "0.75rem"
+              }}
+            />
+          </Field>
+          {ai.system_prompt && (
+            <button onClick={() => set("system_prompt", "")}
+              style={{ marginTop: "0.25rem", background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "0.75rem" }}>
+              ↺ 기본값으로 초기화
+            </button>
           )}
         </div>
 

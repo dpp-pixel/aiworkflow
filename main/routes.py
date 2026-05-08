@@ -843,6 +843,10 @@ def ai_complete(body: dict = Body(...)):
     ctx = int(body.get("contextLines", 3))
     instruction = body.get("instruction", "Improve this method.")
 
+    # 커스텀 시스템 프롬프트 (설정에 없으면 기본값)
+    custom_sys = ai_cfg.get("system_prompt", "").strip()
+    system_prompt = custom_sys if custom_sys else _DIFF_SYSTEM_PROMPT
+
     if not anchors:
         raise HTTPException(400, "anchors required")
 
@@ -863,7 +867,7 @@ def ai_complete(body: dict = Body(...)):
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={"model": model, "messages": [
-                    {"role": "system", "content": _DIFF_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg}
                 ]},
                 timeout=60
@@ -882,7 +886,7 @@ def ai_complete(body: dict = Body(...)):
             resp = requests.post(
                 f"{ollama_url}/api/chat",
                 json={"model": model, "stream": False, "messages": [
-                    {"role": "system", "content": _DIFF_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg}
                 ]},
                 timeout=120

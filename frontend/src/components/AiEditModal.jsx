@@ -18,7 +18,8 @@ export default function AiEditModal({
   const [msg, setMsg] = useState(undefined);
   const [err, setErr] = useState(undefined);
   const [violations, setViolations] = useState(null);
-  const [aiProvider, setAiProvider] = useState(null); // 현재 설정된 제공자
+  const [aiProvider, setAiProvider] = useState(null);
+  const [instruction, setInstruction] = useState(""); // 수정 지시
 
   // 현재 AI 제공자 로드
   useEffect(() => {
@@ -79,9 +80,10 @@ export default function AiEditModal({
   const composedPrompt = useMemo(() => {
     if (!pack) return "";
     const item = pack.items[0];
+    const task = instruction.trim() ? `\n# 수정 지시\n${instruction.trim()}\n` : "";
     const header = `# 목적
 주어진 메서드만 안전하게 수정하고, unified diff로만 결과를 반환하세요.
-
+${task}
 # 대상 앵커
 ${selected}
 
@@ -92,7 +94,7 @@ ${item?.text || ""}
 \`\`\`
 `;
     return header;
-  }, [pack, selected]);
+  }, [pack, selected, instruction]);
 
   useEffect(() => { 
     setPrompt(composedPrompt); 
@@ -163,6 +165,7 @@ ${item?.text || ""}
           anchors,
           baseline: baseline || "working",
           contextLines: 3,
+          instruction: instruction.trim() || "Improve this method.",
         })
       });
       const j = await r.json();
@@ -352,23 +355,19 @@ ${item?.text || ""}
         )}
 
         {/* 탭 선택 + 제공자 뱃지 */}
-        <div style={{ marginBottom: "16px", display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid #243244" }}>
+        <div style={{ marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid #243244" }}>
           <button onClick={() => setMode("manual")} style={{
-            padding: "0.5rem 1rem",
-            backgroundColor: "transparent",
-            color: mode === "manual" ? "white" : "#9ca3af",
-            border: "none",
+            padding: "0.5rem 1rem", backgroundColor: "transparent",
+            color: mode === "manual" ? "white" : "#9ca3af", border: "none",
             borderBottom: mode === "manual" ? "2px solid #3b82f6" : "2px solid transparent",
             cursor: "pointer", fontSize: "0.9rem"
-          }}>수동</button>
+          }}>외부 AI</button>
           <button onClick={() => setMode("auto")} style={{
-            padding: "0.5rem 1rem",
-            backgroundColor: "transparent",
-            color: mode === "auto" ? "white" : "#9ca3af",
-            border: "none",
+            padding: "0.5rem 1rem", backgroundColor: "transparent",
+            color: mode === "auto" ? "white" : "#9ca3af", border: "none",
             borderBottom: mode === "auto" ? "2px solid #3b82f6" : "2px solid transparent",
             cursor: "pointer", fontSize: "0.9rem"
-          }}>자동</button>
+          }}>내부 AI</button>
           {aiProvider && (
             <span style={{
               marginLeft: "auto", fontSize: "0.75rem", padding: "0.15rem 0.5rem",
@@ -378,6 +377,24 @@ ${item?.text || ""}
               ● {aiProvider === "ollama" ? "Ollama" : aiProvider === "openai" ? "OpenAI" : "External"}
             </span>
           )}
+        </div>
+
+        {/* 지시 입력창 — 두 탭 공통 */}
+        <div style={{ marginBottom: "16px" }}>
+          <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: "6px" }}>무엇을 수정할까요?</div>
+          <input
+            type="text"
+            value={instruction}
+            onChange={e => setInstruction(e.target.value)}
+            placeholder="예: null 체크 추가, 로깅 넣기, 성능 개선..."
+            style={{
+              width: "100%", padding: "0.5rem 0.75rem", boxSizing: "border-box",
+              backgroundColor: "#0b1220", color: "#e5e7eb",
+              border: "1px solid #243244", borderRadius: "6px",
+              fontSize: "0.875rem", outline: "none"
+            }}
+            onKeyDown={e => { if (e.key === "Enter" && mode === "auto") sendToServer(); }}
+          />
         </div>
 
         {pack && mode === "manual" && (
