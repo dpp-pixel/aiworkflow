@@ -14,8 +14,95 @@ JAVAC_ERROR_RE = re.compile(
     r"^(?P<file>.+\.java):(?P<line>\d+): (?P<sev>error|warning): (?P<msg>.+)$"
 )
 
+def _get_workspace() -> Path:
+    ws = str(WORKSPACE)
+    if not ws:
+        raise RuntimeError("워크스페이스가 설정되지 않았습니다")
+    return Path(ws)
+
 def _collect_source_files() -> List[Path]:
-    return [p for p in Path(WORKSPACE).rglob("*.java")]
+    return [p for p in _get_workspace().rglob("*.java")]
+
+def _sep() -> str:
+    return ";" if platform.system().lower().startswith("win") else ":"
+
+def detect_build_tool() -> str:
+    """워크스페이스에서 빌드 도구 자동 감지. 'maven' | 'gradle' | 'javac'"""
+    ws = _get_workspace()
+    if (ws / "pom.xml").exists():
+        return "maven"
+    if (ws / "build.gradle").exists() or (ws / "build.gradle.kts").exists():
+        return "gradle"
+    return "javac"
+
+def run_maven_compile() -> Tuple[int, str, str]:
+    """mvn compile 실행. Maven이 없으면 (127, '', 'mvn not found') 반환."""
+    ws = _get_workspace()
+    mvnw = ws / ("mvnw.cmd" if platform.system().lower().startswith("win") else "mvnw")
+    cmd = [str(mvnw)] if mvnw.exists() else ["mvn"]
+    cmd += ["compile", "-f", str(ws / "pom.xml"), "--batch-mode", "-q"]
+    try:
+        proc = subprocess.run(cmd, cwd=str(ws), capture_output=True, text=True, timeout=300)
+        return (proc.returncode, proc.stdout, proc.stderr)
+    except FileNotFoundError:
+        return (127, "", "mvn not found in PATH")
+
+# [ERROR] /abs/path/File.java:[12,5] error message
+# [WARNING] /abs/path/File.java:[12,5] warning message
+_MVN_ERROR_RE = re.compile(
+    r"^\[(?P<sev>ERROR|WARNING)\]\s+(?P<file>.+\.java):\[(?P<line>\d+),\d+\]\s+(?P<msg>.+)$"
+)
+
+def parse_maven_output(stdout: str, stderr: str) -> List[Dict[str, Any]]:
+    diags: List[Dict[str, Any]] = []
+    ws = str(_get_workspace()).replace("\\", "/")
+    for line in (stdout + "\n" + stderr).splitlines():
+        m = _MVN_ERROR_RE.match(line.strip())
+        if not m:
+            continue
+        file_path = m.group("file").replace("\\", "/")
+        # 워크스페이스 절대경로 → 상대경로
+        if file_path.startswith(ws):
+            file_path = file_path[len(ws):].lstrip("/")
+        diags.append({
+            "file":     file_path,
+            "line":     int(m.group("line")),
+            "severity": "error" if m.group("sev") == "ERROR" else "warning",
+            "message":  m.group("msg").strip(),
+        })
+    return diags
+
+def run_gradle_compile() -> Tuple[int, str, str]:
+    """gradlew compileJava 실행."""
+    ws = _get_workspace()
+    is_win = platform.system().lower().startswith("win")
+    gradlew = ws / ("gradlew.bat" if is_win else "gradlew")
+    cmd = (["cmd", "/c", str(gradlew)] if is_win else [str(gradlew)]) + ["compileJava", "-q"]
+    if not gradlew.exists():
+        cmd = ["gradle", "compileJava", "-q"]
+    try:
+        proc = subprocess.run(cmd, cwd=str(ws), capture_output=True, text=True, timeout=300)
+        return (proc.returncode, proc.stdout, proc.stderr)
+    except FileNotFoundError:
+        return (127, "", "gradle not found in PATH")
+
+def run_compile() -> Tuple[str, int, str, str]:
+    """빌드 도구 자동 감지 후 컴파일. (tool, returncode, stdout, stderr) 반환."""
+    tool = detect_build_tool()
+    if tool == "maven":
+        code, out, err = run_maven_compile()
+    elif tool == "gradle":
+        code, out, err = run_gradle_compile()
+    else:
+        code, out, err = run_javac_compile()
+    return (tool, code, out, err)
+
+def parse_compile_output(tool: str, stdout: str, stderr: str) -> List[Dict[str, Any]]:
+    """빌드 도구에 맞는 파서로 출력 파싱."""
+    if tool == "maven":
+        return parse_maven_output(stdout, stderr)
+    else:
+        return parse_javac_output(stdout, stderr)
 
 def _default_classpath() -> str:
     # libs/, lib/ 아래 .jar 자동 포함 + 환경 CLASSPATH 존중

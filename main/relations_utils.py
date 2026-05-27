@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple, Set
 import re
 
 from .utils import WORKSPACE
-from .java_indexer import _find_package, _iter_classes
+from .indexers import for_file, all_extensions
 
 IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z0-9_$.]+)\s*;", re.M)
 
@@ -35,19 +35,21 @@ GENERIC_TYPE_RE = re.compile(r"<[^>]*([A-Z][A-Za-z0-9_]*)[^>]*>")
 CLASS_INDEX: Dict[str, Set[str]] = {}
 
 def _build_class_index() -> None:
-    """워크스페이스의 모든 자바 클래스를 스캔하여 전역 인덱스 구축"""
+    """워크스페이스의 모든 소스 파일을 스캔하여 전역 클래스 인덱스 구축"""
     global CLASS_INDEX
     CLASS_INDEX = {}
-    for p in Path(WORKSPACE).rglob("*.java"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        pkg = _find_package(text)
-        for _, pos in _iter_classes(text):
-            m = re.search(r"\b(class|interface|enum)\s+([A-Za-z_]\w*)", text[pos:pos+200])
-            if not m:
+    ws = Path(WORKSPACE)
+    for ext in all_extensions():
+        for p in ws.rglob(f"*{ext}"):
+            indexer = for_file(p)
+            if not indexer:
                 continue
-            cls = m.group(2)
-            fq = f"{pkg}.{cls}" if pkg else cls
-            CLASS_INDEX.setdefault(cls, set()).add(fq)
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            pkg = indexer.get_namespace(text, p, ws)
+            for unit in indexer.get_units(text):
+                cls = unit["name"]
+                fq = f"{pkg}.{cls}" if pkg else cls
+                CLASS_INDEX.setdefault(cls, set()).add(fq)
 
 def _imports_map(text: str) -> Dict[str, str]:
     m: Dict[str, str] = {}
@@ -105,39 +107,46 @@ def build_relations_basic() -> List[Dict[str, Any]]:
     # ★ 전역 인덱스 구축 (한 번만)
     _build_class_index()
 
+    ws = Path(WORKSPACE)
+
     # 1) 클래스/패키지 맵 생성 (FQCN 인식)
     fq_by_file: Dict[str, List[str]] = {}
-    for p in Path(WORKSPACE).rglob("*.java"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        pkg = _find_package(text)
-        for _, pos in _iter_classes(text):
-            m = re.search(r"\b(class|interface|enum)\s+([A-Za-z_]\w*)", text[pos:pos+200])
-            if not m:
+    for ext in all_extensions():
+        for p in ws.rglob(f"*{ext}"):
+            indexer = for_file(p)
+            if not indexer:
                 continue
-            cls = m.group(2)
-            fq = f"{pkg}.{cls}" if pkg else cls
-            fq_by_file.setdefault(str(p), []).append(fq)
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            pkg = indexer.get_namespace(text, p, ws)
+            for unit in indexer.get_units(text):
+                cls = unit["name"]
+                fq = f"{pkg}.{cls}" if pkg else cls
+                fq_by_file.setdefault(str(p), []).append(fq)
 
     # 2) extends/implements (재사용)
-    for p in Path(WORKSPACE).rglob("*.java"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        # Dynamic import to avoid circular dependency
-        from .graph_utils import _class_relations_in_text
-        for kind, src_fq, dst_fq in _class_relations_in_text(text):
-            key = (src_fq, dst_fq, kind)
-            if key in seen: 
-                continue
-            seen.add(key)
-            edges.append({
-                "from": f"cls:{src_fq}",
-                "to":   f"cls:{dst_fq}",
-                "kind": kind
-            })
+    from .graph_utils import _class_relations_in_text
+    for ext in all_extensions():
+        for p in ws.rglob(f"*{ext}"):
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            for kind, src_fq, dst_fq in _class_relations_in_text(text, p):
+                key = (src_fq, dst_fq, kind)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append({
+                    "from": f"cls:{src_fq}",
+                    "to":   f"cls:{dst_fq}",
+                    "kind": kind
+                })
 
     # 3) calls/references (정적 호출 + new 표현만 잡는 가벼운 휴리스틱)
-    for p in Path(WORKSPACE).rglob("*.java"):
+    for ext in all_extensions():
+      for p in ws.rglob(f"*{ext}"):
+        indexer = for_file(p)
+        if not indexer:
+            continue
         text = p.read_text(encoding="utf-8", errors="ignore")
-        pkg = _find_package(text)
+        pkg = indexer.get_namespace(text, p, ws)
         imap = _imports_map(text)
 
         # 이 파일 안의 source 클래스들

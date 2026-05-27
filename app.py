@@ -1,3 +1,4 @@
+import asyncio
 import os
 import glob
 import sqlite3
@@ -5,7 +6,6 @@ import hashlib
 import re
 import time
 import difflib
-import secrets
 import json
 from datetime import datetime
 from time import time as now
@@ -28,11 +28,6 @@ from logs.routes import router as logs_router
 # ---- Helper Functions ----
 
 
-def require_api_key(x_api_key: str | None = Header(None)):
-    if not getattr(app.state, "api_key", None):
-        raise HTTPException(400, "api key not initialized (set workspace first)")
-    if x_api_key != app.state.api_key:
-        raise HTTPException(401, "invalid api key")
 
 
 def file_sha(path: str) -> str:
@@ -117,8 +112,6 @@ _DEFAULT_CFG = {
     "last_workspace": None,
     "default_mask": True,
     "auto_scan": True,
-    "persist_mcp_key": True,
-    "api_key": None,
     "ui": {"theme": "light"},
     "ai": {
         "provider": "ollama",           # "ollama" | "openai" | "external"
@@ -186,17 +179,18 @@ app.state.db_path = None
 app.state.current_checkpoint = None
 
 @app.on_event("startup")
+async def init_event_bus():
+    from main.event_bus import BUS
+    BUS.set_loop(asyncio.get_event_loop())
+
+@app.on_event("startup")
 async def restore_last_workspace():
-    """서버 재시작 시 마지막 워크스페이스 자동 복원"""
+    """서버 재시작 시 마지막 워크스페이스 자동 복원 (SSE/watcher 없이)"""
     cfg = load_cfg()
     last = cfg.get("last_workspace")
     if last and os.path.isdir(last):
-        app.state.workspace = last
-        app.state.db_path = os.path.join(last, ".contextpanel", "context.db")
-        if cfg.get("persist_mcp_key") and cfg.get("api_key"):
-            app.state.api_key = cfg["api_key"]
-        else:
-            app.state.api_key = secrets.token_urlsafe(24)
+        app.state.workspace = os.path.abspath(last)
+        app.state.db_path = os.path.join(app.state.workspace, ".contextpanel", "context.db")
         init_db(app.state.db_path)
 
 def init_db(db_path: str):
@@ -240,9 +234,15 @@ def init_db(db_path: str):
           ts REAL,
           branch TEXT,
           cp_id INTEGER,
-          packet_path TEXT
+          packet_path TEXT,
+          summary TEXT
         )
     """)
+    # 기존 DB 마이그레이션: summary 컬럼 없으면 추가
+    try:
+        cur.execute("ALTER TABLE logs ADD COLUMN summary TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -288,7 +288,6 @@ class LogAddReq(BaseModel):
 class SettingsUpdate(BaseModel):
     default_mask: bool | None = None
     auto_scan: bool | None = None
-    persist_mcp_key: bool | None = None
     ui: dict | None = None
     ai: dict | None = None
 
@@ -306,8 +305,6 @@ def _mask_key(key: str) -> str:
 @app.get("/settings")
 def get_settings():
     cfg = load_cfg()
-    if getattr(app.state, "api_key", None):
-        cfg["api_key"] = app.state.api_key if cfg.get("persist_mcp_key") else None
     # OpenAI 키는 마스킹해서 반환 (프론트에 실제 키 노출 방지)
     if cfg.get("ai", {}).get("openai_key"):
         import copy
@@ -329,11 +326,6 @@ def update_settings(body: SettingsUpdate):
             cfg["ai"] = new_ai
         else:
             cfg[k] = v
-    if cfg.get("persist_mcp_key") is False:
-        cfg["api_key"] = None
-    else:
-        if getattr(app.state, "api_key", None):
-            cfg["api_key"] = app.state.api_key
     save_cfg(cfg)
     # 응답에도 마스킹 적용
     import copy
@@ -367,24 +359,40 @@ def browse_directory(path: str = ""):
         drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
     return {"path": path, "parent": parent, "items": items, "drives": drives}
 
+def _do_switch_workspace(path: str) -> str:
+    """워크스페이스 전환 — 관련 상태 전부 원자적으로 갱신."""
+    abs_path = os.path.abspath(path)
+    app.state.workspace = abs_path
+    app.state.db_path = os.path.join(abs_path, ".contextpanel", "context.db")
+    init_db(app.state.db_path)
+    app.state.last_index = None
+    cfg = load_cfg()
+    cfg["last_workspace"] = abs_path
+    save_cfg(cfg)
+    try:
+        from main.watcher import restart_watcher
+        restart_watcher()
+    except Exception:
+        pass
+    try:
+        from main.event_bus import BUS
+        BUS.publish_sync({"type": "workspace_changed", "workspace": abs_path})
+    except Exception:
+        pass
+    return abs_path
+
+
+@app.get("/workspace/current")
+def get_workspace_current():
+    return {"workspace": getattr(app.state, "workspace", None)}
+
+
 @app.post("/workspace/set")
 def set_workspace(req: WorkspaceReq):
     if not os.path.isdir(req.path):
         raise HTTPException(400, "Not a folder")
-    app.state.workspace = os.path.abspath(req.path)
-    app.state.db_path = os.path.join(app.state.workspace, ".contextpanel", "context.db")
-    if not getattr(app.state, "api_key", None):
-        app.state.api_key = secrets.token_urlsafe(24)
-    init_db(app.state.db_path)
-    
-    # 설정 저장
-    cfg = load_cfg()
-    cfg["last_workspace"] = app.state.workspace
-    if cfg.get("persist_mcp_key"):   # 세션 키를 저장
-        cfg["api_key"] = getattr(app.state, "api_key", None)
-    save_cfg(cfg)
-    
-    return {"workspace": app.state.workspace, "db": app.state.db_path, "api_key": app.state.api_key}
+    path = _do_switch_workspace(req.path)
+    return {"workspace": path, "db": app.state.db_path}
 
 @app.post("/workspace/scan")
 def scan_workspace():

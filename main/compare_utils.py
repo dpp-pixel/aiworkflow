@@ -5,9 +5,7 @@ from typing import Dict, Any, Iterable
 import re, json, hashlib
 
 from .utils import WORKSPACE
-from .anchor_utils import anchor_cls, anchor_pkg, anchor_method
-# 내부 파서를 재사용하기 위해 java_indexer의 헬퍼를 import
-from .java_indexer import _find_package, _iter_classes, _find_methods
+from .indexers import for_file, all_extensions
 
 CKPT_ROOT = (Path("./.contextpanel/checkpoints")).resolve()
 BLOBS = CKPT_ROOT / "blobs"
@@ -36,19 +34,21 @@ def load_state_files(state: str, scope_globs: Iterable[str] | None = None) -> Di
         return any(fnmatch(rel, pat) for pat in scope_globs)
 
     if state == "working":
-        for p in Path(WORKSPACE).rglob("*.java"):
-            if _match(p.relative_to(WORKSPACE)):
-                rel_path = str(p.relative_to(WORKSPACE)).replace("\\", "/")
-                files[rel_path] = p.read_text(encoding="utf-8", errors="ignore")
+        for ext in all_extensions():
+            for p in Path(WORKSPACE).rglob(f"*{ext}"):
+                if _match(p.relative_to(WORKSPACE)):
+                    rel_path = str(p.relative_to(WORKSPACE)).replace("\\", "/")
+                    files[rel_path] = p.read_text(encoding="utf-8", errors="ignore")
         return files
 
     if state.startswith("dir:"):
         base = Path(state.split(":", 1)[1]).resolve()
-        for p in base.rglob("*.java"):
-            rel = p.relative_to(base)
-            if _match(rel):
-                rel_path = str(rel).replace("\\", "/")
-                files[rel_path] = p.read_text(encoding="utf-8", errors="ignore")
+        for ext in all_extensions():
+            for p in base.rglob(f"*{ext}"):
+                rel = p.relative_to(base)
+                if _match(rel):
+                    rel_path = str(rel).replace("\\", "/")
+                    files[rel_path] = p.read_text(encoding="utf-8", errors="ignore")
         return files
 
     if state.startswith("ckpt_"):
@@ -58,7 +58,7 @@ def load_state_files(state: str, scope_globs: Iterable[str] | None = None) -> Di
         mani = json.loads(mani_path.read_text(encoding="utf-8"))
         for f in mani.get("files", []):
             path = f.get("path", "")
-            if not path.endswith(".java"):  # 자바만 비교
+            if not any(path.endswith(ext) for ext in all_extensions()):
                 continue
             if scope_globs:
                 from fnmatch import fnmatch
@@ -83,28 +83,26 @@ def index_filemap(filemap: Dict[str, str]) -> Dict[str, Any]:
     """
     anchors: Dict[str, Any] = {}
     reverse: Dict[str, Any] = {}
+
     for path, text in filemap.items():
-        package = _find_package(text)
-        classes = _iter_classes(text)
-        for idx, (cls_name, cls_pos) in enumerate(classes):
-            cls_end = classes[idx+1][1] if idx+1 < len(classes) else len(text)
-            methods = _find_methods(text, cls_pos, cls_end)
-            # 클래스 앵커(필요 시 확장)
-            _ = anchor_cls(package, cls_name)  # 현재는 메서드 중심 비교
-            lines = text.splitlines()
-            for sig, (sl, sc), (el, ec) in methods:
-                # 메서드 본문 텍스트 (파일 좌표 기준 sl~el)
-                body_txt = "\n".join(lines[sl:el+1])
-                h = _sha(_norm_ws(body_txt))
-                loc = (el - sl + 1)
-                a = anchor_method(package, cls_name, sig)  # 공식 anchor 사용 (비교/diff 작업)
-                anchors[a] = {
-                    "file": path,
-                    "hash": h,
-                    "loc": loc,
-                    "range": {"start": [sl, sc], "end": [el, ec]}
-                }
-                reverse.setdefault(path, []).append(a)
+        indexer = for_file(Path(path))
+        if not indexer:
+            continue
+
+        lines = text.splitlines()
+        members = indexer.parse_file_members(text, Path(path), Path(WORKSPACE))
+        for m in members:
+            sl, sc = m["range"]["start"]
+            el, ec = m["range"]["end"]
+            body_txt = "\n".join(lines[sl:el + 1])
+            anchors[m["id"]] = {
+                "file": path,
+                "hash": _sha(_norm_ws(body_txt)),
+                "loc":  el - sl + 1,
+                "range": {"start": [sl, sc], "end": [el, ec]},
+            }
+            reverse.setdefault(path, []).append(m["id"])
+
     return {"anchors": anchors, "reverse": reverse}
 
 def compare_states(from_state: str, to_state: str, scope: Iterable[str] | None = None) -> Dict[str, Any]:

@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends, Query
 from pydantic import BaseModel
 from urllib.parse import quote
 import os, json
+from pathlib import Path
 from datetime import datetime
 from .utils import (
     get_conn, read_text, write_text, split_md_sections, secret_scan,
@@ -219,6 +220,58 @@ def recipes_load(name: str, request: Request):
     reference_ids = [path2id[p] for p in data.get("reference_paths", []) if p in path2id]
     return {"recipe": data, "resolve": {"primary_ids": primary_ids, "reference_ids": reference_ids}}
 
+# ==== /plans (계획 메모장) ====
+class PlanSaveReq(BaseModel):
+    name: str
+    content: str = ""
+
+def _plans_dir(state) -> str:
+    p = os.path.join(getattr(state, "workspace", ""), ".contextpanel", "plans")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+@router.post("/plans/save")
+def plans_save(req: PlanSaveReq, request: Request):
+    state = request.app.state
+    name = _sanitize_name(req.name)
+    data = {"name": name, "content": req.content, "created_at": datetime.now().timestamp()}
+    path = os.path.join(_plans_dir(state), f"{name}.json")
+    write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+    return {"ok": True, "name": name}
+
+@router.get("/plans")
+def plans_list(request: Request):
+    state = request.app.state
+    p = _plans_dir(state)
+    items = []
+    for f in sorted(os.scandir(p), key=lambda d: d.name):
+        if not f.name.lower().endswith(".json"):
+            continue
+        try:
+            j = json.loads(read_text(f.path))
+            items.append({"name": j.get("name"), "created_at": j.get("created_at")})
+        except Exception:
+            pass
+    return items
+
+@router.get("/plans/{name}")
+def plans_get(name: str, request: Request):
+    state = request.app.state
+    path = os.path.join(_plans_dir(state), f"{_sanitize_name(name)}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "plan not found")
+    return json.loads(read_text(path))
+
+@router.delete("/plans/{name}")
+def plans_delete(name: str, request: Request):
+    state = request.app.state
+    path = os.path.join(_plans_dir(state), f"{_sanitize_name(name)}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "plan not found")
+    os.remove(path)
+    return {"ok": True}
+
+
 # ==== /export/report (컨텍스트 리포트) ====
 class ExportReq(BaseModel):
     mask_secrets: bool = True
@@ -244,11 +297,18 @@ def export_report(req: ExportReq, request: Request):
     out_path = os.path.join(out_dir, fname); write_text(out_path, "\n\n---\n\n".join(parts))
     return {"ok": True, "path": out_path, "download": f"/export/file?path={out_path}"}
 
-# ==== MCP (API Key는 app.py에 남아있는 require_api_key를 그대로 써도 되고, 여기서 재구현해도 OK) ====
+# ==== MCP — external_key를 인증 키로 사용 ====
 def _require_api_key(request: Request):
-    state = request.app.state
-    if not getattr(state, "api_key", None): raise HTTPException(400, "api key not initialized (set workspace first)")
-    return state.api_key
+    import sys, os as _os
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from app import load_cfg
+    cfg = load_cfg()
+    key = cfg.get("ai", {}).get("external_key", "").strip()
+    if not key:
+        raise HTTPException(400, "MCP 접근 불가 — AI 설정에서 외부 API 키를 먼저 등록해주세요.")
+    provided = request.headers.get("X-API-Key", "")
+    if provided != key:
+        raise HTTPException(401, "Invalid API key")
 
 @router.get("/mcp/manifest")
 def mcp_manifest(request: Request, _=Depends(_require_api_key)):

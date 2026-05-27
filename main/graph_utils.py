@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional, Set
 import re
 
 from .utils import WORKSPACE
-from .java_indexer import _find_package, _iter_classes
+from .indexers import for_file
 from .compare_utils import load_state_files, compare_states
 from .relations_utils import build_relations_basic
 
@@ -37,11 +37,14 @@ def _resolve_type(simple_or_fq: str, pkg: str, imports: Dict[str, str]) -> str:
         return imports[t]
     return f"{pkg}.{t}" if pkg else t
 
-def _class_relations_in_text(text: str) -> List[Tuple[str, str, str]]:
+def _class_relations_in_text(text: str, file_path: Path = None) -> List[Tuple[str, str, str]]:
     """
     return list of (kind, srcFQCN, dstFQCN) with kind in {'extends','implements'}
     """
-    pkg = _find_package(text)
+    ws = Path(WORKSPACE)
+    fp = file_path or ws
+    indexer = for_file(fp)
+    pkg = indexer.get_namespace(text, fp, ws) if indexer else ""
     imap = _imports_map(text)
     rels: List[Tuple[str, str, str]] = []
     for m in CLASS_HDR_RE.finditer(text):
@@ -63,43 +66,47 @@ def _current_classes_and_packages() -> Tuple[Dict[str, Dict[str, Any]], Dict[str
       classes: {fqcn -> {id,label,pkg,file}}
       packages:{name -> {id,label}}
     """
+    from .indexers import all_extensions
     classes: Dict[str, Dict[str, Any]] = {}
     packages: Dict[str, Dict[str, Any]] = {}
-    for p in Path(WORKSPACE).rglob("*.java"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        pkg = _find_package(text)
-
-        # vo 패키지 필터링 (임시로 숨김)
-        if pkg and ".vo" in pkg:
-            continue
-
-        packages.setdefault(pkg, {"id": f"pkg:{pkg}", "label": pkg or ""})
-        for _, pos in _iter_classes(text):
-            # 이름만 필요하면 간단 파싱
-            m = re.search(r"\b(class|interface|enum)\s+([A-Za-z_]\w*)", text[pos:pos+200])
-            if not m:
+    ws = Path(WORKSPACE)
+    for ext in all_extensions():
+        for p in ws.rglob(f"*{ext}"):
+            indexer = for_file(p)
+            if not indexer:
                 continue
-            cls_name = m.group(2)
-            fq = f"{pkg}.{cls_name}" if pkg else cls_name
-            classes[fq] = {
-                "id": f"cls:{fq}",
-                "label": cls_name,
-                "pkg": pkg,
-                "file": str(p.relative_to(WORKSPACE)).replace("\\","/")
-            }
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            pkg = indexer.get_namespace(text, p, ws)
+
+            # vo 패키지 필터링 (임시로 숨김)
+            if pkg and ".vo" in pkg:
+                continue
+
+            packages.setdefault(pkg, {"id": f"pkg:{pkg}", "label": pkg or ""})
+            for unit in indexer.get_units(text):
+                cls_name = unit["name"]
+                fq = f"{pkg}.{cls_name}" if pkg else cls_name
+                classes[fq] = {
+                    "id": f"cls:{fq}",
+                    "label": cls_name,
+                    "pkg": pkg,
+                    "file": str(p.relative_to(ws)).replace("\\", "/")
+                }
     return classes, packages
 
 def _edges_extends_implements() -> List[Dict[str, str]]:
+    from .indexers import all_extensions
     edges: List[Dict[str, str]] = []
-    # 모든 파일에서 관계 수집
-    for p in Path(WORKSPACE).rglob("*.java"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        for kind, src_fq, dst_fq in _class_relations_in_text(text):
-            edges.append({
-                "source": f"cls:{src_fq}",
-                "target": f"cls:{dst_fq}",
-                "kind": kind
-            })
+    ws = Path(WORKSPACE)
+    for ext in all_extensions():
+        for p in ws.rglob(f"*{ext}"):
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            for kind, src_fq, dst_fq in _class_relations_in_text(text, p):
+                edges.append({
+                    "source": f"cls:{src_fq}",
+                    "target": f"cls:{dst_fq}",
+                    "kind": kind
+                })
     return edges
 
 def _overlay_class_level(baseline: Optional[str]) -> Dict[str, str]:

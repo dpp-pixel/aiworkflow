@@ -63,13 +63,22 @@ export default function DiagnosePanel({ onJump }) {
         </button>
       </div>
       
-      <div style={{ 
-        padding: "8px 10px", 
+      <div style={{
+        padding: "8px 10px",
         color: "#94a3b8",
-        fontSize: "0.9rem",
-        borderBottom: "1px solid #1e293b"
+        fontSize: "0.85rem",
+        borderBottom: "1px solid #1e293b",
+        display: "flex", gap: "12px", alignItems: "center"
       }}>
-        errors: {summary.errors} / warnings: {summary.warnings}
+        <span style={{ color: "#f87171" }}>오류 {summary.errors}</span>
+        <span style={{ color: "#eab308" }}>경고 {summary.warnings}</span>
+        {summary.tool && (
+          <span style={{
+            marginLeft: "auto", fontSize: "0.75rem",
+            color: "#60a5fa", backgroundColor: "#0c1d3a",
+            padding: "1px 6px", borderRadius: "4px", fontFamily: "monospace"
+          }}>{summary.tool}</span>
+        )}
       </div>
       
       <div style={{ flex: 1, overflow: "auto" }}>

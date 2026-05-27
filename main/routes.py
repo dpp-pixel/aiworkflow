@@ -10,7 +10,7 @@ import asyncio
 from pydantic import BaseModel
 from typing import Literal
 from sse_starlette.sse import EventSourceResponse
-from .java_indexer import index_workspace
+from .indexers import index_workspace
 from .compare_utils import compare_states
 from .utils import WORKSPACE, ensure_workspace
 from .snippets import build_snippet_pack
@@ -18,7 +18,8 @@ from .patch_utils import apply_unified_patch_with_guards, RegionLockViolationErr
 from .checkpoint_utils import create_checkpoint, list_checkpoints, MANI, _restore_apply
 from .diagnostic_utils import (
     run_javac_compile, parse_javac_output, map_diags_to_anchors,
-    run_gradle_test_if_available, parse_gradle_test
+    run_gradle_test_if_available, parse_gradle_test,
+    run_compile, parse_compile_output, detect_build_tool,
 )
 from .diagnostics_utils import compile_project, summarize
 from .graph_utils import build_graph
@@ -49,7 +50,8 @@ _watcher_started = False
 def ensure_watcher():
     global _watcher_started
     if not _watcher_started:
-        start_watcher()
+        from .watcher import restart_watcher
+        restart_watcher()
         _watcher_started = True
 
 # Pydantic models
@@ -213,6 +215,21 @@ def get_method(nodeId: str, request: Request):
         "range": {"start": [0, 0], "end": [0, 0]},
     }
 
+@router.get("/file-content")
+def get_file_content(file: str):
+    """워크스페이스 기준 상대경로 파일의 전체 내용 반환"""
+    workspace_path = ensure_workspace()
+    if not workspace_path:
+        raise HTTPException(400, "Workspace not set")
+    target = (Path(workspace_path) / file).resolve()
+    # 워크스페이스 밖 접근 차단
+    if not str(target).startswith(str(Path(workspace_path).resolve())):
+        raise HTTPException(403, "Access denied")
+    if not target.exists():
+        raise HTTPException(404, "File not found")
+    return {"content": target.read_text(encoding="utf-8", errors="ignore")}
+
+
 @router.post("/compare")
 def compare(req: CompareReq):
     """
@@ -302,15 +319,20 @@ def apply_patch(node_id: str, req: ApplyReq):
         )
         
         # 성공 시 SSE
+        BUS.publish_sync({
+            "type": "apply_succeeded",
+            "paths": result.get("changedFiles", [])
+        })
+
+        # AI 적용 로그 기록
         try:
-            import asyncio
-            asyncio.create_task(BUS.publish({
-                "type": "apply_succeeded",
-                "paths": result.get("changedFiles", [])
-            }))
+            from logs.utils import log_ai_apply
+            changed = [f.get("file", "") if isinstance(f, dict) else str(f)
+                       for f in result.get("changedFiles", [])]
+            log_ai_apply(anchor=node_id, checkpoint_id=str(ckpt_id), changed_files=changed)
         except Exception:
             pass
-        
+
         return {
             "ok": True,
             "checkpointId": ckpt_id,
@@ -330,15 +352,11 @@ def apply_patch(node_id: str, req: ApplyReq):
             "rationale": req.rationale
         }
         # 실패 SSE도 함께 (메인 자동 새로고침/토스트)
-        try:
-            import asyncio
-            asyncio.create_task(BUS.publish({
-                "type": "apply_failed",
-                "reason": "region_lock_violation",
-                "violations": e.violations,
-            }))
-        except Exception:
-            pass
+        BUS.publish_sync({
+            "type": "apply_failed",
+            "reason": "region_lock_violation",
+            "violations": e.violations,
+        })
         return payload
 
     except HTTPException:
@@ -375,10 +393,14 @@ def diagnose(req: DiagnoseReq):
         all_diags = []
 
         if "compile" in req.pipeline:
-            code, out, err = run_javac_compile()
-            comp_diags_basic = parse_javac_output(out, err)
+            tool, code, out, err = run_compile()
+            comp_diags_basic = parse_compile_output(tool, out, err)
             comp_diags = map_diags_to_anchors(comp_diags_basic)
             all_diags.extend(comp_diags)
+            all_diags.insert(0, {
+                "kind": "info", "severity": "info",
+                "message": f"빌드 도구: {tool} (returncode={code})"
+            })
 
         if "test" in req.pipeline:
             r = run_gradle_test_if_available()
@@ -393,11 +415,12 @@ def diagnose(req: DiagnoseReq):
                     "message":"Gradle wrapper not found; skipped test pipeline"
                 })
 
-        errors = sum(1 for d in all_diags if d.get("severity") == "error")
+        errors   = sum(1 for d in all_diags if d.get("severity") == "error")
         warnings = sum(1 for d in all_diags if d.get("severity") == "warning")
+        tool     = detect_build_tool()
 
         return {
-            "summary": {"errors": errors, "warnings": warnings},
+            "summary": {"errors": errors, "warnings": warnings, "tool": tool},
             "diagnostics": all_diags
         }
         
@@ -665,12 +688,11 @@ def apply_diff(req: DiffApplyReq):
             os.unlink(patch_file)
             
             if result.get("ok"):
-                # Publish update event
-                asyncio.create_task(BUS.publish({
+                BUS.publish_sync({
                     "type": "index_updated",
                     "paths": result.get("appliedFiles", []),
                     "reason": "diff_applied"
-                }))
+                })
                 
                 return {
                     "ok": True,
@@ -798,6 +820,13 @@ async def ai_callback(request: Request):
 
 # ---- 통합 AI 완성 엔드포인트 ----
 
+_SIG_IDENTIFY_SYSTEM = (
+    "You are a Java codebase analyzer. "
+    "Given method signatures with anchor IDs, identify which methods need modification. "
+    "Return ONLY valid JSON: {\"targets\": [\"anchor_id_1\", \"anchor_id_2\"]}. "
+    "No explanation, no markdown, just JSON."
+)
+
 _DIFF_SYSTEM_PROMPT = (
     "You are a Java code editor. "
     "When given Java source code and an instruction, apply the change and return ONLY a unified diff. "
@@ -805,6 +834,30 @@ _DIFF_SYSTEM_PROMPT = (
     "Include 3 lines of context around changes. "
     "Do not reformat or change unrelated code. "
     "Output the diff only, no explanation."
+)
+
+_PARSE_SYSTEM = (
+    "You are a file operation extractor. "
+    "Given text that contains code editing instructions (possibly in Korean or English), "
+    "extract all file operations and return ONLY a JSON array. "
+    "Each element: {\"action\": \"modify\"|\"create\"|\"delete\", \"file\": \"relative/path/to/File.java\", "
+    "\"diff\": \"unified diff string (for modify)\", \"content\": \"full file content (for create)\"} "
+    "For modify: include unified diff with --- a/path +++ b/path headers. "
+    "For create: include full file content. "
+    "  IMPORTANT for Java files: always infer the package declaration from the file path. "
+    "  Example: file='src/main/java/model/Alpha.java' → first line must be 'package model;' "
+    "  Example: file='src/main/java/com/example/service/UserService.java' → 'package com.example.service;' "
+    "  The package is everything between 'java/' and the filename, with '/' replaced by '.'. "
+    "For delete: only file path needed. "
+    "Return ONLY the JSON array, no explanation, no markdown."
+)
+
+_ANALYZE_SYSTEM = (
+    "당신은 Java 코드 변경을 분석하는 도우미입니다. "
+    "파일 변경 내역을 보고 한국어로 정확히 2문장으로 답하세요. "
+    "첫 번째 문장: 무슨 작업인지 (파일명, 변경 종류 포함). "
+    "두 번째 문장: 왜 한 것 같은지 (추측). "
+    "형식: '작업: [내용]\n의도: [추측]' — 이 두 줄만 출력하세요."
 )
 
 def _extract_diff(text: str) -> str:
@@ -819,6 +872,255 @@ def _extract_diff(text: str) -> str:
     if m:
         return m.group(1).strip()
     return text.strip()
+
+
+def _call_ai_text(provider: str, ai_cfg: dict, system: str, user: str) -> str:
+    """AI 제공자에 텍스트 요청 후 raw 텍스트 반환 (diff/JSON 공용)."""
+    if provider == "openai":
+        api_key = ai_cfg.get("openai_key", "")
+        model   = ai_cfg.get("openai_model", "gpt-4o")
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ]},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    else:  # ollama (default)
+        ollama_url = ai_cfg.get("ollama_url", "http://localhost:11434").rstrip("/")
+        model      = ai_cfg.get("ollama_model", "qwen2.5-coder:7b")
+        resp = requests.post(
+            f"{ollama_url}/api/chat",
+            json={"model": model, "stream": False, "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ]},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["message"]["content"]
+
+
+def _auto_analyze_log(log_id: int) -> None:
+    """파일 변경 로그에 AI 자동 분석 추가 (watcher 스레드에서 호출)."""
+    try:
+        from app import load_cfg
+        from logs.utils import get_conn
+        cfg = load_cfg()
+        ai_cfg = cfg.get("ai", {})
+        provider = ai_cfg.get("provider", "ollama")
+
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT details FROM logs WHERE id=?", (log_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return
+
+        import json as _json
+        details = {}
+        try:
+            details = _json.loads(row[0]) if row[0] else {}
+        except Exception:
+            pass
+
+        path = details.get("path", "")
+        kind = details.get("kind", "")
+        diff = (details.get("diff") or "")[:2000]
+
+        user_msg = f"파일: {path}\n변경 종류: {kind}\n\ndiff:\n{diff}" if diff else f"파일: {path}\n변경 종류: {kind}"
+
+        summary = _call_ai_text(provider, ai_cfg, _ANALYZE_SYSTEM, user_msg)
+
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE logs SET summary=? WHERE id=?", (summary.strip(), log_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[auto-analyze] log_id={log_id} error: {e}")
+
+
+@router.post("/ai/sig-request")
+def ai_sig_request(body: dict = Body(...), request: Request = None):
+    """
+    Sig 뷰 기반 자유 지시문 AI 요청 (2-step).
+    Step1: 전체 sig → AI가 타겟 앵커 선정 (JSON)
+    Step2: 각 앵커 실제 코드 → AI가 unified diff 생성
+    Input:  { projectId, instruction }
+    Output: { targets, diff, provider, model }
+    """
+    import json as _json
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    from app import load_cfg
+
+    cfg    = load_cfg()
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "ollama")
+
+    instruction = (body.get("instruction") or "").strip()
+    project_id  = body.get("projectId", "default")
+    if not instruction:
+        raise HTTPException(400, "instruction required")
+
+    index = getattr(request.app.state, "last_index", None) if request else None
+    if not index:
+        raise HTTPException(400, "인덱스 없음 — 워크스페이스 스캔 먼저 해주세요.")
+
+    # ── Step 1: sig context 빌드 ─────────────────────────────
+    sig_lines: list[str] = []
+    anchor_to_info: dict = {}
+    for pkg in index.get("packages", []):
+        for cls in pkg.get("classes", []):
+            file_path = cls.get("file", "")
+            methods   = cls.get("methods", [])
+            if not methods:
+                continue
+            sig_lines.append(f"\n## {file_path}\nclass {cls['name']}:")
+            for m in methods:
+                anchor   = m["id"]
+                sig      = m.get("sig") or m.get("uiLabel", "")
+                sl       = m.get("range", {}).get("start", [0])[0]
+                el       = m.get("range", {}).get("end", [0])[0]
+                sig_lines.append(f"  [{anchor}] {sig}  // lines {sl}-{el}")
+                anchor_to_info[anchor] = {
+                    "file": file_path,
+                    "sig": sig,
+                    "range": m.get("range", {}),
+                }
+
+    sig_context = "\n".join(sig_lines)
+    step1_user  = f"# Method Signatures\n{sig_context}\n\n# Instruction\n{instruction}"
+
+    try:
+        raw1 = _call_ai_text(provider, ai_cfg, _SIG_IDENTIFY_SYSTEM, step1_user)
+    except Exception as e:
+        raise HTTPException(502, f"AI Step1 오류: {e}")
+
+    # JSON 파싱 (코드블록 안에 있을 수도 있음)
+    import re as _re
+    json_m = _re.search(r"\{.*\}", raw1, _re.DOTALL)
+    targets: list[str] = []
+    if json_m:
+        try:
+            targets = _json.loads(json_m.group()).get("targets", [])
+        except Exception:
+            pass
+    # 파싱 실패 시 anchor가 응답 텍스트 안에 있으면 fallback
+    if not targets:
+        targets = [a for a in anchor_to_info if a in raw1]
+
+    # 인덱스에 없는 앵커 제거
+    targets = [t for t in targets if t in anchor_to_info]
+    if not targets:
+        raise HTTPException(400, f"AI가 수정 대상을 찾지 못했습니다. 지시문을 더 구체적으로 작성해주세요.\n(AI 응답: {raw1[:300]})")
+
+    # ── Step 2: 각 앵커 실제 코드 → diff 생성 ───────────────
+    custom_sys   = ai_cfg.get("system_prompt", "").strip()
+    system_prompt = custom_sys if custom_sys else _DIFF_SYSTEM_PROMPT
+
+    diffs: list[str] = []
+    model_used = ""
+    for anchor in targets:
+        try:
+            pack = build_snippet_pack(project_id, [anchor], 3, "working")
+            code = pack["items"][0]["text"] if pack.get("items") else ""
+            real_file = anchor_to_info.get(anchor, {}).get("file", "")
+            user_msg = (
+                f"Anchor: {anchor}\n"
+                f"File: {real_file}\n"
+                f"Instruction: {instruction}\n\n"
+                f"IMPORTANT: Use exactly '--- a/{real_file}' and '+++ b/{real_file}' in the diff header.\n\n"
+                f"```java\n{code}\n```"
+            )
+            raw2 = _call_ai_text(provider, ai_cfg, system_prompt, user_msg)
+            d    = _extract_diff(raw2)
+            if d:
+                diffs.append(d)
+            # model 이름 추출 (Ollama 응답엔 없으니 cfg에서)
+            model_used = ai_cfg.get("ollama_model" if provider == "ollama" else "openai_model", "")
+        except Exception as e:
+            print(f"[sig-request] Step2 오류 ({anchor}): {e}")
+
+    # AI 편집 로그
+    try:
+        from logs.utils import log_ai_edit
+        log_ai_edit(anchor=",".join(targets), instruction=instruction,
+                    provider=provider, model=model_used, diff="\n".join(diffs))
+    except Exception:
+        pass
+
+    return {
+        "type": "sync",
+        "targets": targets,
+        "diff": "\n".join(diffs),
+        "provider": provider,
+        "model": model_used,
+    }
+
+
+@router.post("/ai/sig-apply")
+def ai_sig_apply(body: dict = Body(...)):
+    """
+    Sig AI 요청 결과 diff 적용 (멀티파일 지원, 체크포인트 자동 생성).
+    Input:  { projectId, diff }
+    Output: { ok, checkpointId, changedFiles }
+    """
+    project_id = body.get("projectId", "default")
+    diff_text  = body.get("diff", "").strip()
+    if not diff_text:
+        raise HTTPException(400, "diff required")
+
+    ensure_workspace()
+    workspace = Path(WORKSPACE)
+
+    # 자동 체크포인트
+    ckpt_id = create_checkpoint(project_id, "auto-before-sig-ai")
+
+    # 멀티파일 diff 적용
+    from .patch_utils import parse_unified_diff, apply_patch_to_text
+    try:
+        patches = parse_unified_diff(diff_text)
+    except Exception as e:
+        raise HTTPException(400, f"diff 파싱 실패: {e}")
+
+    changed: list[str] = []
+    errors:  list[str] = []
+    for fp in patches:
+        fpath = workspace / fp.path
+        if not fpath.exists():
+            # strip leading a/ or b/ just in case
+            alt = fp.path.lstrip("ab/")
+            fpath = workspace / alt
+        if not fpath.exists():
+            errors.append(f"파일 없음: {fp.path}")
+            continue
+        try:
+            lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+            for hunk in fp.hunks:
+                lines, _ = apply_patch_to_text(lines, hunk)
+            fpath.write_text("\n".join(lines), encoding="utf-8")
+            changed.append(fp.path)
+        except Exception as e:
+            errors.append(f"{fp.path}: {e}")
+
+    if errors and not changed:
+        raise HTTPException(400, f"적용 실패: {'; '.join(errors)}")
+
+    BUS.publish_sync({
+        "type": "index_updated",
+        "paths": changed,
+        "reason": "sig_ai_applied"
+    })
+
+    return {"ok": True, "checkpointId": ckpt_id, "changedFiles": changed, "errors": errors}
+
 
 @router.post("/ai/complete")
 def ai_complete(body: dict = Body(...)):
@@ -874,7 +1176,12 @@ def ai_complete(body: dict = Body(...)):
             )
             resp.raise_for_status()
             raw = resp.json()["choices"][0]["message"]["content"]
-            return {"type": "sync", "diff": _extract_diff(raw), "provider": "openai", "model": model}
+            diff_out = _extract_diff(raw)
+            try:
+                from logs.utils import log_ai_edit
+                log_ai_edit(anchor=anchor, instruction=instruction, provider="openai", model=model, diff=diff_out)
+            except Exception: pass
+            return {"type": "sync", "diff": diff_out, "provider": "openai", "model": model}
         except requests.RequestException as e:
             raise HTTPException(502, f"OpenAI API error: {e}")
 
@@ -893,7 +1200,12 @@ def ai_complete(body: dict = Body(...)):
             )
             resp.raise_for_status()
             raw = resp.json()["message"]["content"]
-            return {"type": "sync", "diff": _extract_diff(raw), "provider": "ollama", "model": model}
+            diff_out = _extract_diff(raw)
+            try:
+                from logs.utils import log_ai_edit
+                log_ai_edit(anchor=anchor, instruction=instruction, provider="ollama", model=model, diff=diff_out)
+            except Exception: pass
+            return {"type": "sync", "diff": diff_out, "provider": "ollama", "model": model}
         except requests.RequestException as e:
             raise HTTPException(502, f"Ollama error: {e}")
 
@@ -1050,6 +1362,207 @@ async def analyze_method(req: AnalyzeReq):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _do_apply_ops(workspace: str, ops: list) -> tuple:
+    """ops 목록을 워크스페이스에 적용. returns (applied_list, all_diffs_list)."""
+    import os as _os
+    from pathlib import Path as _Path
+    from .patch_utils import parse_unified_diff, apply_patch_to_text
+
+    applied = []
+    all_diffs = []
+
+    for op in ops:
+        action = (op.get("action") or "").lower()
+        rel_file = (op.get("file") or "").replace("\\", "/").lstrip("/")
+
+        if not rel_file and action != "delete":
+            applied.append({"action": action, "file": rel_file, "status": "skipped", "error": "no file path"})
+            continue
+
+        abs_path = _os.path.join(workspace, rel_file) if rel_file else ""
+
+        try:
+            if action == "create":
+                content = op.get("content", "")
+                _Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
+                _Path(abs_path).write_text(content, encoding="utf-8")
+                applied.append({"action": "create", "file": rel_file, "status": "ok"})
+
+            elif action == "delete":
+                if abs_path and _os.path.isfile(abs_path):
+                    _os.remove(abs_path)
+                    applied.append({"action": "delete", "file": rel_file, "status": "ok"})
+                else:
+                    applied.append({"action": "delete", "file": rel_file, "status": "skipped", "error": "file not found"})
+
+            elif action == "modify":
+                diff_text = op.get("diff", "")
+                if not diff_text:
+                    applied.append({"action": "modify", "file": rel_file, "status": "skipped", "error": "no diff"})
+                    continue
+                patches = parse_unified_diff(diff_text)
+                if not patches:
+                    applied.append({"action": "modify", "file": rel_file, "status": "skipped", "error": "invalid diff"})
+                    continue
+                target = abs_path if _os.path.isfile(abs_path) else None
+                if not target:
+                    for fp in patches:
+                        candidate = _os.path.join(workspace, fp.path.lstrip("/"))
+                        if _os.path.isfile(candidate):
+                            target = candidate
+                            rel_file = fp.path.lstrip("/")
+                            break
+                if not target:
+                    applied.append({"action": "modify", "file": rel_file, "status": "error", "error": "file not found"})
+                    continue
+                lines = _Path(target).read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+                for fp in patches:
+                    for hunk in fp.hunks:
+                        lines = apply_patch_to_text(lines, hunk)
+                _Path(target).write_text("".join(lines), encoding="utf-8")
+                all_diffs.append(diff_text)
+                applied.append({"action": "modify", "file": rel_file, "status": "ok"})
+
+            else:
+                applied.append({"action": action, "file": rel_file, "status": "skipped", "error": "unknown action"})
+
+        except Exception as ex:
+            applied.append({"action": action, "file": rel_file, "status": "error", "error": str(ex)})
+
+    return applied, all_diffs
+
+
+@router.post("/ai/paste-apply")
+def ai_paste_apply(body: dict = Body(...)):
+    """
+    ChatGPT 등 외부 AI 응답 텍스트를 붙여넣으면 AI가 파싱해서 파일 조작 실행.
+    Input:  { text: "ChatGPT 응답 전체", projectId: "default" }
+    Output: { ok: true, applied: [{action, file, status, error?}] }
+    """
+    import json as _json, os as _os, re as _re
+    from pathlib import Path as _Path
+    from app import load_cfg
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    cfg = load_cfg()
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "ollama")
+
+    workspace = ensure_workspace()
+    if not workspace:
+        raise HTTPException(400, "workspace not set")
+
+    # 현재 인덱스에서 프로젝트 구조 컨텍스트 생성
+    project_context = ""
+    try:
+        from app import app as _app
+        idx = getattr(_app.state, "last_index", None)
+        if idx and idx.get("packages"):
+            pkg_lines = []
+            for pkg in idx["packages"]:
+                pkg_name = pkg.get("packageName", "")
+                classes = [c.get("className", "") for c in pkg.get("classes", [])]
+                if pkg_name and classes:
+                    pkg_lines.append(f"  package {pkg_name}: {', '.join(classes)}")
+            if pkg_lines:
+                project_context = "\n\nCurrent project packages:\n" + "\n".join(pkg_lines)
+    except Exception:
+        pass
+
+    # 1) AI로 파일 조작 지시 파싱
+    try:
+        raw = _call_ai_text(provider, ai_cfg, _PARSE_SYSTEM, text + project_context)
+    except Exception as e:
+        raise HTTPException(502, f"AI 파싱 오류: {e}")
+
+    # JSON 추출 (코드블록 제거)
+    raw_clean = _re.sub(r"```(?:json)?\n?", "", raw).replace("```", "").strip()
+    try:
+        ops = _json.loads(raw_clean)
+        if not isinstance(ops, list):
+            raise ValueError("not a list")
+    except Exception:
+        # 폴백: diff만 추출해서 단일 modify 시도
+        diff = _extract_diff(raw)
+        if not diff:
+            raise HTTPException(422, f"AI 응답을 파싱할 수 없습니다: {raw[:200]}")
+        ops = [{"action": "modify", "file": "unknown", "diff": diff}]
+
+    # dry_run: ops 확인만 하고 적용 안 함
+    if body.get("dry_run", False):
+        return {"ok": True, "ops": ops}
+
+    # 2) 각 지시 실행
+    from logs.utils import log_ai_edit
+    applied, all_diffs = _do_apply_ops(workspace, ops)
+
+    # 3) 로그 기록
+    try:
+        ok_files = [a["file"] for a in applied if a["status"] == "ok"]
+        log_ai_edit(
+            anchor=", ".join(ok_files) or "paste-apply",
+            instruction=text[:300],
+            provider=provider,
+            model=ai_cfg.get(f"{provider}_model", ""),
+            diff="\n".join(all_diffs),
+        )
+    except Exception:
+        pass
+
+    # 4) SSE 발행
+    try:
+        changed_paths = [a["file"] for a in applied if a["status"] == "ok"]
+        BUS.publish_sync({"type": "index_updated", "paths": changed_paths, "touchedAnchors": []})
+    except Exception:
+        pass
+
+    return {"ok": True, "applied": applied}
+
+
+@router.post("/ai/paste-apply-ops")
+def ai_paste_apply_ops(body: dict = Body(...)):
+    """Pre-parsed ops를 직접 적용 (AI 호출 없이)."""
+    from app import load_cfg
+    from logs.utils import log_ai_edit
+
+    ops = body.get("ops", [])
+    if not ops:
+        raise HTTPException(400, "ops required")
+
+    workspace = ensure_workspace()
+    if not workspace:
+        raise HTTPException(400, "workspace not set")
+
+    cfg = load_cfg()
+    ai_cfg = cfg.get("ai", {})
+    provider = ai_cfg.get("provider", "ollama")
+
+    applied, all_diffs = _do_apply_ops(workspace, ops)
+
+    try:
+        ok_files = [a["file"] for a in applied if a["status"] == "ok"]
+        log_ai_edit(
+            anchor=", ".join(ok_files) or "paste-apply-ops",
+            instruction="(붙여넣기 적용)",
+            provider=provider,
+            model=ai_cfg.get(f"{provider}_model", ""),
+            diff="\n".join(all_diffs),
+        )
+    except Exception:
+        pass
+
+    try:
+        changed_paths = [a["file"] for a in applied if a["status"] == "ok"]
+        BUS.publish_sync({"type": "index_updated", "paths": changed_paths, "touchedAnchors": []})
+    except Exception:
+        pass
+
+    return {"ok": True, "applied": applied}
 
 
 @router.post("/ai/analyze-class")

@@ -18,12 +18,13 @@ import model.Review;
 public class testdo extends HttpServlet {
 	private static final long serialVersionUID = 1L;
 
-	protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
-		insertReview(request, response);
-	}
 
-	protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
-		insertReview(request, response);
+		System.out.println("DP");
+		int asdd = 0;
+		RequestDispatcher dis = request.getRequestDispatcher("index.jsp");
+		dis.forward(request, response);
+	};
+}
 	}
 
 	protected void insertReview(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {

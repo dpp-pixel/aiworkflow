@@ -151,6 +151,38 @@ def log_ai_plan(
     )
 
 
+def log_ai_edit(
+    anchor: str,
+    instruction: str,
+    provider: str,
+    model: str,
+    diff: Optional[str] = None,
+    applied: Optional[bool] = None,
+) -> int:
+    """AI 편집 요청(diff 생성) 기록"""
+    title = f"AI편집: {anchor}"
+    details = json.dumps({
+        "anchor": anchor,
+        "instruction": instruction,
+        "provider": provider,
+        "model": model,
+        "diff": diff[:5000] if diff else None,
+        "applied": applied,
+    }, ensure_ascii=False)
+    return add_log_entry(type="ai_edit", title=title, details=details)
+
+
+def log_ai_apply(anchor: str, checkpoint_id: str, changed_files: list) -> int:
+    """AI diff 적용(apply) 기록"""
+    title = f"AI적용: {anchor}"
+    details = json.dumps({
+        "anchor": anchor,
+        "checkpointId": checkpoint_id,
+        "changedFiles": changed_files,
+    }, ensure_ascii=False)
+    return add_log_entry(type="ai_apply", title=title, details=details)
+
+
 def log_file_change(path: str, kind: str, diff: Optional[str] = None) -> int:
     """파일 변경 이벤트 기록 (watcher에서 호출)"""
     kind_label = {"created": "생성", "modified": "수정", "deleted": "삭제"}.get(kind, kind)

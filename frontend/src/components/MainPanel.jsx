@@ -7,6 +7,320 @@ import ViolationModal from "./ViolationModal";
 import { connectSSE } from "../sse.ts";
 import { toast } from "../toast.js";
 
+// ---------- Tip ----------
+function Tip({ text, children }) {
+  const [show, setShow] = React.useState(false);
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex' }}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+    >
+      {children}
+      {show && (
+        <span style={{
+          position: 'absolute', bottom: '130%', left: '50%',
+          transform: 'translateX(-50%)',
+          backgroundColor: '#1c2128', color: '#c9d1d9',
+          border: '1px solid #30363d', borderRadius: '6px',
+          padding: '3px 8px', fontSize: '11px',
+          whiteSpace: 'nowrap', zIndex: 9999, pointerEvents: 'none',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+        }}>{text}</span>
+      )}
+    </span>
+  );
+}
+
+// ---------- buildClassText ----------
+function buildClassText(data) {
+  const VIS_SYM = { public: '+', protected: '#', private: '-', package: '~' };
+  const lines = [];
+
+  const annots = data.annotations?.length ? data.annotations.map(a => `@${a}`).join(' ') + '\n' : '';
+  lines.push(`${annots}${data.kind ?? 'class'} ${data.fqcn}`);
+
+  if (data.fields?.length) {
+    lines.push('');
+    lines.push('  // fields');
+    for (const f of data.fields) {
+      const sym = VIS_SYM[f.visibility] ?? '~';
+      lines.push(`  ${sym} ${f.declaration}`);
+    }
+  }
+
+  if (data.methods?.length) {
+    lines.push('');
+    lines.push('  // methods');
+    for (const m of data.methods) {
+      const sym = VIS_SYM[m.visibility] ?? '~';
+      const annot = m.annotations?.length ? m.annotations.map(a => `@${a}`).join(' ') + ' ' : '';
+      lines.push(`  ${sym} ${annot}${m.sig ?? m.uiLabel}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+// ---------- FieldRow ----------
+function FieldRow({ f }) {
+  const visibilityColor = f.visibility === 'public'    ? '#10b981'
+    : f.visibility === 'protected' ? '#f59e0b'
+    : f.visibility === 'private'   ? '#6b7280'
+    : '#60a5fa';
+  const tipText = f.visibility === 'public' ? 'public'
+    : f.visibility === 'protected' ? 'protected'
+    : f.visibility === 'private' ? 'private'
+    : 'default (package-private)';
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: '0.5rem',
+      padding: '0.2rem 0.25rem',
+      fontSize: '0.75rem',
+      fontFamily: 'ui-monospace, monospace',
+      color: '#6e7681',
+    }}>
+      <Tip text={tipText}>
+        <span style={{ width: 6, height: 6, borderRadius: '2px', backgroundColor: visibilityColor, flexShrink: 0, display: 'inline-block', cursor: 'default' }} />
+      </Tip>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.declaration || f.name}</span>
+    </div>
+  );
+}
+
+// ---------- CopyBtn ----------
+function CopyBtn({ text, getText, style: extraStyle }) {
+  const [copied, setCopied] = React.useState(false);
+  const base = extraStyle ?? {
+    background: "none", border: "none", cursor: "pointer",
+    color: copied ? "#10b981" : "#4b5563",
+    fontSize: "0.72rem", padding: "1px 3px", lineHeight: 1,
+    flexShrink: 0,
+  };
+  const handleClick = async (e) => {
+    e.stopPropagation();
+    const content = getText ? await getText() : (text || "");
+    navigator.clipboard.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <button
+      onClick={handleClick}
+      title="복사"
+      style={{ ...base, color: copied ? "#10b981" : (base.color ?? "#4b5563") }}
+    >
+      {copied ? "✓ 복사됨" : "⎘ 복사"}
+    </button>
+  );
+}
+
+// ---------- SigAiModal ----------
+function SigAiModal({ open, onClose, onApplied }) {
+  const API = window.__API_BASE__ ?? (window.location.port === "5173" ? "http://127.0.0.1:8001" : "");
+  const [instruction, setInstruction] = useState("");
+  const [status, setStatus]           = useState("idle"); // idle | running | done | error
+  const [result, setResult]           = useState(null);   // { targets, diff, provider }
+  const [errorMsg, setErrorMsg]       = useState("");
+  const [applying, setApplying]       = useState(false);
+  const [applyDone, setApplyDone]     = useState(null);
+
+  const reset = () => { setInstruction(""); setStatus("idle"); setResult(null); setErrorMsg(""); setApplyDone(null); };
+
+  const handleSubmit = async () => {
+    if (!instruction.trim()) return;
+    setStatus("running"); setResult(null); setErrorMsg("");
+    try {
+      const res = await fetch(`${API}/main/ai/sig-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: "default", instruction: instruction.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "요청 실패");
+      setResult(data);
+      setStatus("done");
+    } catch (e) {
+      setErrorMsg(e.message);
+      setStatus("error");
+    }
+  };
+
+  const handleApply = async () => {
+    if (!result?.diff) return;
+    setApplying(true);
+    try {
+      const res = await fetch(`${API}/main/ai/sig-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: "default", diff: result.diff }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "적용 실패");
+      setApplyDone(data);
+      onApplied?.();
+    } catch (e) {
+      setApplyDone({ ok: false, error: e.message });
+    } finally { setApplying(false); }
+  };
+
+  if (!open) return null;
+
+  const S = {
+    overlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.7)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center" },
+    box:     { width: "min(680px, 95vw)", maxHeight: "85vh", backgroundColor: "#0d1117", border: "1px solid #30363d", borderRadius: "12px", display: "flex", flexDirection: "column", overflow: "hidden" },
+    header:  { padding: "14px 18px", borderBottom: "1px solid #21262d", display: "flex", alignItems: "center", gap: "8px" },
+    body:    { flex: 1, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: "12px" },
+    footer:  { padding: "12px 18px", borderTop: "1px solid #21262d", display: "flex", gap: "8px", justifyContent: "flex-end" },
+  };
+
+  const diffLines = result?.diff ? result.diff.split("\n") : [];
+
+  return (
+    <div style={S.overlay} onClick={e => { if (e.target === e.currentTarget) { reset(); onClose(); } }}>
+      <div style={S.box}>
+        {/* Header */}
+        <div style={S.header}>
+          <span style={{ fontSize: "0.9rem", fontWeight: "600", color: "#e6edf3", flex: 1 }}>🤖 Sig AI 요청</span>
+          <span style={{ fontSize: "0.72rem", color: "#6b7280" }}>시그니처 전체를 컨텍스트로 AI에게 전달합니다</span>
+          <button onClick={() => { reset(); onClose(); }} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "1.1rem" }}>✕</button>
+        </div>
+
+        <div style={S.body}>
+          {/* 지시문 입력 */}
+          <div>
+            <div style={{ fontSize: "0.75rem", color: "#9ca3af", marginBottom: "6px" }}>지시문</div>
+            <textarea
+              autoFocus
+              value={instruction}
+              onChange={e => setInstruction(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) handleSubmit(); }}
+              placeholder={"예: deleteReview에 int asdd=0; 추가하고, main 메서드에 asdd 관련 호출 추가해줘"}
+              rows={3}
+              style={{
+                width: "100%", boxSizing: "border-box", padding: "10px 12px",
+                backgroundColor: "#161b22", color: "#e6edf3", border: "1px solid #30363d",
+                borderRadius: "6px", fontSize: "0.85rem", resize: "vertical", outline: "none",
+                fontFamily: "ui-sans-serif, sans-serif",
+              }}
+            />
+            <div style={{ fontSize: "0.68rem", color: "#4b5563", marginTop: "4px" }}>Ctrl+Enter로 전송</div>
+          </div>
+
+          {/* 진행 상태 */}
+          {status === "running" && (
+            <div style={{ color: "#60a5fa", fontSize: "0.82rem", display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
+              Step 1: 시그니처 분석 중... → Step 2: 코드 수정 생성 중...
+            </div>
+          )}
+
+          {status === "error" && (
+            <div style={{ backgroundColor: "#2d1b1b", border: "1px solid #7f1d1d", borderRadius: "6px", padding: "10px 12px" }}>
+              <div style={{ color: "#f87171", fontSize: "0.82rem", fontWeight: "600", marginBottom: "4px" }}>❌ 오류</div>
+              <div style={{ color: "#fca5a5", fontSize: "0.78rem", whiteSpace: "pre-wrap" }}>{errorMsg}</div>
+            </div>
+          )}
+
+          {/* 결과 */}
+          {status === "done" && result && (
+            <>
+              {/* 타겟 앵커 */}
+              <div>
+                <div style={{ fontSize: "0.72rem", color: "#9ca3af", marginBottom: "5px" }}>
+                  ✅ AI가 선정한 수정 대상 ({result.targets?.length || 0}개)
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                  {(result.targets || []).map(t => (
+                    <span key={t} style={{
+                      padding: "2px 8px", borderRadius: "4px", fontSize: "0.68rem",
+                      backgroundColor: "#1e3a5f", color: "#60a5fa",
+                      border: "1px solid #1d4ed8", fontFamily: "monospace",
+                    }}>{t.replace(/^m:/, "")}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Diff 미리보기 */}
+              {result.diff ? (
+                <div>
+                  <div style={{ fontSize: "0.72rem", color: "#9ca3af", marginBottom: "5px" }}>Diff 미리보기</div>
+                  <div style={{
+                    maxHeight: "280px", overflowY: "auto", overflowX: "auto",
+                    backgroundColor: "#070d14", border: "1px solid #21262d", borderRadius: "6px",
+                    padding: "8px 10px", fontFamily: "monospace", fontSize: "0.7rem",
+                  }}>
+                    {diffLines.map((line, i) => {
+                      let color = "#9ca3af";
+                      if (line.startsWith("+++") || line.startsWith("---")) color = "#6b7280";
+                      else if (line.startsWith("+")) color = "#86efac";
+                      else if (line.startsWith("-")) color = "#f87171";
+                      else if (line.startsWith("@@")) color = "#60a5fa";
+                      return <div key={i} style={{ color, whiteSpace: "pre", lineHeight: "1.4" }}>{line || " "}</div>;
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ color: "#f59e0b", fontSize: "0.8rem" }}>⚠️ AI가 diff를 생성하지 못했습니다. 지시문을 더 구체적으로 작성해보세요.</div>
+              )}
+
+              {/* 적용 결과 */}
+              {applyDone && (
+                <div style={{
+                  padding: "10px 12px", borderRadius: "6px",
+                  backgroundColor: applyDone.ok ? "#1e3a2e" : "#2d1b1b",
+                  border: `1px solid ${applyDone.ok ? "#059669" : "#dc2626"}`,
+                }}>
+                  <div style={{ color: applyDone.ok ? "#10b981" : "#f87171", fontWeight: "600", fontSize: "0.82rem" }}>
+                    {applyDone.ok ? "✅ 적용 완료" : "❌ 적용 실패"}
+                  </div>
+                  {applyDone.ok && (applyDone.changedFiles || []).map(f => (
+                    <div key={f} style={{ fontSize: "0.72rem", color: "#94a3b8", marginTop: "2px" }}>📄 {f}</div>
+                  ))}
+                  {applyDone.errors?.length > 0 && (
+                    <div style={{ fontSize: "0.72rem", color: "#fca5a5", marginTop: "4px" }}>{applyDone.errors.join(", ")}</div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={S.footer}>
+          {status !== "done" ? (
+            <>
+              <button onClick={() => { reset(); onClose(); }} style={{ padding: "6px 14px", fontSize: "0.8rem", backgroundColor: "#21262d", color: "#9ca3af", border: "1px solid #30363d", borderRadius: "6px", cursor: "pointer" }}>취소</button>
+              <button onClick={handleSubmit} disabled={status === "running" || !instruction.trim()} style={{
+                padding: "6px 18px", fontSize: "0.8rem", borderRadius: "6px", border: "none",
+                backgroundColor: status === "running" || !instruction.trim() ? "#1f2937" : "#7c3aed",
+                color: status === "running" || !instruction.trim() ? "#6b7280" : "white",
+                cursor: status === "running" || !instruction.trim() ? "not-allowed" : "pointer",
+              }}>
+                {status === "running" ? "처리 중..." : "전송"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={reset} style={{ padding: "6px 14px", fontSize: "0.8rem", backgroundColor: "#21262d", color: "#9ca3af", border: "1px solid #30363d", borderRadius: "6px", cursor: "pointer" }}>다시 요청</button>
+              <button onClick={() => { reset(); onClose(); }} style={{ padding: "6px 14px", fontSize: "0.8rem", backgroundColor: "#21262d", color: "#9ca3af", border: "1px solid #30363d", borderRadius: "6px", cursor: "pointer" }}>닫기</button>
+              {result?.diff && !applyDone && (
+                <button onClick={handleApply} disabled={applying} style={{
+                  padding: "6px 18px", fontSize: "0.8rem", borderRadius: "6px", border: "none",
+                  backgroundColor: applying ? "#1f2937" : "#059669",
+                  color: applying ? "#6b7280" : "white",
+                  cursor: applying ? "not-allowed" : "pointer",
+                }}>
+                  {applying ? "적용 중..." : "✓ 적용"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Types ----------
 const OverlayChangeKind = {
   ADDED: "added",
@@ -44,12 +358,22 @@ function ClassCard({
     ? "ring-2 ring-red-400 opacity-70"
     : "";
 
+  const KIND_COLORS = {
+    class:     '#38bdf8',
+    interface: '#2dd4bf',
+    enum:      '#f472b6',
+    record:    '#c084fc',
+  };
+  const kindColor = KIND_COLORS[data.kind] ?? KIND_COLORS.class;
+
   return (
     <Card ref={registerRef} className={cn("relative shadow-lg hover:shadow-xl transition-all duration-200 group", ring)}
           style={{
-            borderRadius: '16px',
+            borderRadius: '8px',
             backgroundColor: '#161b22',
             border: '1px solid #30363d',
+            borderLeft: `3px solid ${kindColor}`,
+            marginLeft: '0.5rem',
             overflow: 'hidden'
           }}>
       <CardHeader
@@ -59,7 +383,6 @@ function ClassCard({
           borderBottom: collapsed ? 'none' : '1px solid #21262d',
           padding: '1rem 1.25rem',
           cursor: 'pointer',
-          userSelect: 'none',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem' }}>
@@ -71,14 +394,51 @@ function ClassCard({
               marginBottom: '0.25rem',
               display: 'flex',
               alignItems: 'center',
-              gap: '0.5rem'
+              gap: '0.5rem',
             }}>
               <span style={{ fontSize: '9px', color: '#6e7681' }}>{collapsed ? '▶' : '▼'}</span>
               {data.name}
+              {(() => {
+                const KIND = {
+                  class:     { label: 'C', color: '#38bdf8', bg: '#0c2233', title: 'Class' },
+                  interface: { label: 'I', color: '#2dd4bf', bg: '#0a2929', title: 'Interface' },
+                  enum:      { label: 'E', color: '#f472b6', bg: '#2e0f1e', title: 'Enum' },
+                  record:    { label: 'R', color: '#c084fc', bg: '#1e0f35', title: 'Record' },
+                };
+                const k = KIND[data.kind] ?? KIND.class;
+                return (
+                  <Tip text={k.title}>
+                    <span style={{
+                      fontSize: '10px', fontWeight: 700, lineHeight: 1,
+                      color: k.color, backgroundColor: k.bg,
+                      padding: '1px 5px', borderRadius: '4px',
+                      fontFamily: 'ui-monospace, monospace', flexShrink: 0,
+                      cursor: 'default',
+                    }}>{k.label}</span>
+                  </Tip>
+                );
+              })()}
               <span style={{ fontSize: '11px', color: '#6e7681', fontWeight: 400 }}>
                 {data.methods?.length || 0}
               </span>
+              <CopyBtn getText={async () => {
+                const API = window.__API_BASE__ ?? (window.location.port === "5173" ? "http://127.0.0.1:8001" : "");
+                try {
+                  const res = await fetch(`${API}/main/file-content?file=${encodeURIComponent(data.file)}`);
+                  const json = await res.json();
+                  return json.content ?? buildClassText(data);
+                } catch {
+                  return buildClassText(data);
+                }
+              }} />
             </CardTitle>
+            {data.annotations?.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px', marginBottom: '3px' }}>
+                {data.annotations.map(a => (
+                  <span key={a} style={{ fontSize: '9px', color: '#e879f9', backgroundColor: '#2d1236', padding: '1px 5px', borderRadius: '3px', fontFamily: 'ui-monospace, monospace' }}>@{a}</span>
+                ))}
+              </div>
+            )}
             <span style={{
               display: 'block',
               fontSize: '0.75rem',
@@ -86,7 +446,7 @@ function ClassCard({
               fontFamily: 'ui-monospace, monospace',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap'
+              whiteSpace: 'nowrap',
             }}>
               {data.fqcn}
             </span>
@@ -130,6 +490,11 @@ function ClassCard({
       </CardHeader>
       {!collapsed && <CardContent style={{ padding: '0.75rem 1rem' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {data.fields?.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem', marginBottom: '0.4rem', paddingBottom: '0.4rem', borderBottom: '1px solid #21262d' }}>
+              {data.fields.map((f) => <FieldRow key={f.id} f={f} />)}
+            </div>
+          )}
           {data.methods.map((m) => (
             <MethodRow
               key={m.id}
@@ -261,7 +626,9 @@ function MethodRow({
         }}
         onClick={() => !removed && onExpand()}
       >
-        <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: visibilityColor, flexShrink: 0, display: 'inline-block' }} />
+        <Tip text={m.visibility === 'public' ? 'public' : m.visibility === 'protected' ? 'protected' : m.visibility === 'private' ? 'private' : 'default (package-private)'}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: visibilityColor, flexShrink: 0, display: 'inline-block', cursor: 'default' }} />
+        </Tip>
         <span style={{ fontFamily: 'ui-monospace, monospace', color: '#c9d1d9', flex: 1, fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {m.sig || m.uiLabel}
         </span>
@@ -347,22 +714,25 @@ function MethodRow({
             }}
           />
         )}
-        <span style={{
-          display: 'inline-block',
-          width: '8px',
-          height: '8px',
-          borderRadius: '50%',
-          backgroundColor: badgeColor,
-          flexShrink: 0,
-        }} />
-        <span style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
-          color: '#c9d1d9',
-          wordBreak: 'break-word',
-          flex: 1,
-          lineHeight: '1.4'
-        }}>
-          {m.collapsed ? (m.preview ?? m.sig + " { ... }") : (m.uiLabel ?? m.sig)}
+        <Tip text={m.visibility === 'public' ? 'public' : m.visibility === 'protected' ? 'protected' : m.visibility === 'private' ? 'private' : 'default (package-private)'}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: visibilityColor, flexShrink: 0, display: 'inline-block', cursor: 'default' }} />
+        </Tip>
+        <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          {m.annotations?.length > 0 && (
+            <span style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
+              {m.annotations.map(a => (
+                <span key={a} style={{ fontSize: '9px', color: '#e879f9', backgroundColor: '#2d1236', padding: '0px 4px', borderRadius: '3px', fontFamily: 'ui-monospace, monospace' }}>@{a}</span>
+              ))}
+            </span>
+          )}
+          <span style={{
+            fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+            color: '#c9d1d9',
+            wordBreak: 'break-word',
+            lineHeight: '1.4',
+          }}>
+            {m.collapsed ? (m.preview ?? m.sig + " { ... }") : (m.uiLabel ?? m.sig)}
+          </span>
         </span>
       </div>
 
@@ -413,6 +783,17 @@ function MethodRow({
       </div>
       {expanded && (
         <div className="relative" style={{ marginTop: '0.75rem' }}>
+          {!expanded.loading && expanded.body && (
+            <CopyBtn
+              text={expanded.body}
+              style={{
+                position: 'absolute', top: '6px', right: '6px', zIndex: 10,
+                padding: '2px 8px', fontSize: '0.68rem', borderRadius: '4px',
+                border: '1px solid #30363d', backgroundColor: '#21262d',
+                color: '#9ca3af', cursor: 'pointer',
+              }}
+            />
+          )}
           <div
             style={{
               maxHeight: '400px',
@@ -559,6 +940,7 @@ export default function MainPanel({
   const [multi, setMulti] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [viewMode, setViewMode] = useState("tree"); // "tree" | "signatures"
+  const [sigAiOpen, setSigAiOpen] = useState(false);
 
   // baseline은 props가 있으면 props 사용, 없으면 내부 state 사용
   const baseline = propBaseline !== undefined ? propBaseline : internalBaseline;
@@ -1210,6 +1592,12 @@ export default function MainPanel({
             }}>{label}</button>
           ))}
         </div>
+        {viewMode === 'signatures' && (
+          <button onClick={() => setSigAiOpen(true)} style={{
+            padding: '0.15rem 0.6rem', fontSize: '0.72rem', borderRadius: '4px', border: 'none',
+            backgroundColor: '#7c3aed', color: 'white', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+          }}>🤖 AI 요청</button>
+        )}
         <span style={{ fontSize: '0.85rem', color: '#6b7280', flexShrink: 0 }}>🔍</span>
         <input
           type="text"
@@ -1231,11 +1619,28 @@ export default function MainPanel({
             <span style={{ color: '#f87171' }}>●</span> 삭제
           </span>
         ) : (
-          <span style={{ fontSize: '0.75rem', color: '#4b5563', flexShrink: 0 }}>
-            <span style={{ color: '#10b981' }}>●</span> public &nbsp;
-            <span style={{ color: '#f59e0b' }}>●</span> protected &nbsp;
-            <span style={{ color: '#6b7280' }}>●</span> private &nbsp;
-            <span style={{ color: '#60a5fa' }}>●</span> package
+          <span style={{ fontSize: '0.72rem', color: '#4b5563', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+            {[
+              { label: 'P', color: '#818cf8', bg: '#1e1b4b' },
+              { label: 'C', color: '#38bdf8', bg: '#0c2233' },
+              { label: 'I', color: '#2dd4bf', bg: '#0a2929' },
+              { label: 'E', color: '#f472b6', bg: '#2e0f1e' },
+              { label: 'R', color: '#c084fc', bg: '#1e0f35' },
+            ].map(({ label, color, bg }) => (
+              <span key={label} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '16px', borderRadius: '3px', backgroundColor: bg, color, fontSize: '9px', fontWeight: 700, fontFamily: 'ui-monospace, monospace' }}>{label}</span>
+            ))}
+            <span style={{ width: '1px', height: '12px', backgroundColor: '#30363d', margin: '0 2px' }} />
+            {[
+              { color: '#10b981', label: 'pub' },
+              { color: '#f59e0b', label: 'prot' },
+              { color: '#6b7280', label: 'priv' },
+              { color: '#60a5fa', label: 'default' },
+            ].map(({ color, label }) => (
+              <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: color, display: 'inline-block' }} />
+                <span>{label}</span>
+              </span>
+            ))}
           </span>
         )}
       </div>
@@ -1248,8 +1653,8 @@ export default function MainPanel({
           minHeight: 0,           // ✅ 스크롤 가능하게
           overflowY: 'auto',
           overflowX: 'hidden',
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          display: 'flex',
+          flexDirection: 'column',
           gap: '1rem'
         }}>
           {(data?.packages || []).map((pkg) => (
@@ -1258,31 +1663,40 @@ export default function MainPanel({
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.625rem',
-                padding: '0.75rem 1rem',
-                backgroundColor: '#161b22',
-                border: '1px solid #30363d',
-                borderRadius: '10px',
-                marginBottom: '0.25rem'
+                padding: '0.625rem 1rem',
+                backgroundColor: '#0d1117',
+                border: '1px solid #21262d',
+                borderLeft: '3px solid #818cf8',
+                borderRadius: '8px',
               }}>
+                <Tip text="Package">
+                  <span style={{
+                    fontSize: '10px', fontWeight: 700, lineHeight: 1,
+                    color: '#818cf8', backgroundColor: '#1e1b4b',
+                    padding: '1px 5px', borderRadius: '4px',
+                    fontFamily: 'ui-monospace, monospace', flexShrink: 0,
+                    cursor: 'default',
+                  }}>P</span>
+                </Tip>
                 <span style={{
-                  fontSize: '1.125rem',
+                  fontSize: '0.9rem',
                   fontWeight: '600',
-                  color: '#58a6ff',
+                  color: '#8b949e',
                   fontFamily: 'ui-monospace, monospace',
                   letterSpacing: '-0.01em'
                 }}>
-                  📦 {pkg.name}
+                  {pkg.name}
                 </span>
                 <span style={{
                   marginLeft: 'auto',
-                  fontSize: '0.75rem',
+                  fontSize: '0.7rem',
                   color: '#6e7681',
-                  backgroundColor: '#21262d',
-                  padding: '0.25rem 0.625rem',
-                  borderRadius: '12px',
+                  backgroundColor: '#161b22',
+                  padding: '0.2rem 0.5rem',
+                  borderRadius: '10px',
                   fontWeight: '500'
                 }}>
-                  {pkg.classes?.length || 0} classes
+                  {pkg.classes?.length || 0}
                 </span>
               </div>
               {(pkg?.classes || []).map((cls) => {
@@ -1345,6 +1759,9 @@ export default function MainPanel({
           <DiagnosePanel onJump={jumpTo} />
         )}
       </div>
+
+          {/* Sig AI 모달 */}
+          <SigAiModal open={sigAiOpen} onClose={() => setSigAiOpen(false)} onApplied={() => setSigAiOpen(false)} />
 
           {/* AI 수정 모달 - 닫히면 언마운트 */}
           {aiTargets && (

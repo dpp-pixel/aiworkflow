@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Set
 from .utils import WORKSPACE
 
+_stop_event: threading.Event | None = None
+
 def _compute_diff(rel_path: str, current_content: str) -> str | None:
     """마지막 체크포인트 대비 unified diff 계산"""
     try:
@@ -36,7 +38,16 @@ def _rel(p: Path) -> str:
     except Exception:
         return str(p).replace("\\", "/")
 
-def start_watcher() -> None:
+def restart_watcher() -> None:
+    """현재 실행 중인 워처를 중단하고 새 워크스페이스로 재시작."""
+    global _stop_event
+    if _stop_event is not None:
+        _stop_event.set()
+    _stop_event = threading.Event()
+    start_watcher(_stop_event)
+
+
+def start_watcher(stop_event: threading.Event | None = None) -> None:
     """
     WORKSPACE 내 .java 변경 감지 → 이벤트 발행
     """
@@ -49,7 +60,7 @@ def start_watcher() -> None:
     def run():
         print(f"[watcher] started for {WORKSPACE}")
         try:
-            for changes in watch(WORKSPACE, recursive=True):
+            for changes in watch(WORKSPACE, recursive=True, stop_event=stop_event):
                 if not changes:  # keep-alive
                     continue
                 
@@ -57,7 +68,8 @@ def start_watcher() -> None:
                 paths: Set[str] = set()
                 for change_type, p in changes:
                     path_str = str(p)
-                    if not path_str.endswith(".java"):
+                    from .indexers import all_extensions
+                    if not any(path_str.endswith(ext) for ext in all_extensions()):
                         continue
                     if any(ex in path_str for ex in ["/build/", "/out/", "/.git/", "\\build\\", "\\out\\", "\\.git\\"]):
                         continue
@@ -66,7 +78,7 @@ def start_watcher() -> None:
                         paths.add(rel_path)
                         print(f"[watcher] detected change: {change_type} {rel_path}")
 
-                        # 로그 기록
+                        # 로그 기록 + 자동 분석
                         try:
                             from watchfiles import Change
                             kind = {Change.added: "created", Change.modified: "modified",
@@ -76,7 +88,11 @@ def start_watcher() -> None:
                                 content = Path(p).read_text(encoding="utf-8", errors="ignore")
                                 diff = _compute_diff(rel_path, content)
                             from logs.utils import log_file_change
-                            log_file_change(rel_path, kind, diff)
+                            log_id = log_file_change(rel_path, kind, diff)
+                            if log_id and log_id > 0:
+                                import threading as _t
+                                from main.routes import _auto_analyze_log
+                                _t.Thread(target=_auto_analyze_log, args=(log_id,), daemon=True).start()
                         except Exception as le:
                             print(f"[watcher] log error: {le}")
 
@@ -101,24 +117,12 @@ def start_watcher() -> None:
                         "touchedAnchors": []  # 실제로는 인덱스 업데이트 후 계산
                     }
                 
-                # 이벤트 발행 (비동기 컨텍스트에서 실행)
+                # 이벤트 발행
                 try:
                     from .event_bus import BUS
-                    # 새 이벤트 루프에서 발행
-                    def publish_event():
-                        try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(BUS.publish(evt))
-                            loop.close()
-                        except Exception as e:
-                            print(f"[watcher] error publishing event: {e}")
-                    
-                    # 별도 스레드에서 실행
-                    pub_thread = threading.Thread(target=publish_event, daemon=True)
-                    pub_thread.start()
+                    BUS.publish_sync(evt)
                 except Exception as e:
-                    print(f"[watcher] error setting up event publishing: {e}")
+                    print(f"[watcher] error publishing event: {e}")
                     
         except Exception as e:
             print(f"[watcher] error in main loop: {e}")
