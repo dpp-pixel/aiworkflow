@@ -30,10 +30,18 @@ def _ts_text(src: bytes, node) -> str:
     return src[node.start_byte:node.end_byte].decode("utf-8", "ignore")
 
 
+_ANNOT_TYPES = {"marker_annotation", "annotation", "single_element_annotation", "normal_annotation"}
+
 def _extract_annotations(node, src: bytes) -> List[str]:
     result = []
     for child in node.children:
-        if child.type in ("marker_annotation", "annotation"):
+        if child.type == "modifiers":
+            for mod in child.children:
+                if mod.type in _ANNOT_TYPES:
+                    name_node = mod.child_by_field_name("name")
+                    if name_node:
+                        result.append(_ts_text(src, name_node))
+        elif child.type in _ANNOT_TYPES:
             name_node = child.child_by_field_name("name")
             if name_node:
                 result.append(_ts_text(src, name_node))

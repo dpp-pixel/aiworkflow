@@ -9,23 +9,20 @@
 ## 🚀 AI QUICK START (READ THIS FIRST!)
 
 ### 📍 현재 작업
-- 이번 세션 완료: MainPanel 트리뷰 UI 대규모 개선 + 백엔드 기능 추가
-  - `frontend/src/components/MainPanel.jsx`: kind 뱃지(C/I/E/R/P), 호버 툴팁, 필드 표시, 어노테이션 뱃지, 비동기 파일복사, 레이아웃 flex-column
-  - `main/java_indexer.py`: kind/annotations 필드 추가, 인터페이스 visibility 수정, enum 본문 파싱 수정
-  - `main/diagnostic_utils.py`: Maven/Gradle 빌드도구 자동감지 + 각 파서 추가
-  - `main/routes.py`: `GET /main/file-content` 엔드포인트 추가, 진단 엔드포인트 빌드도구 통합
-  - `frontend/src/context.jsx`, `log.jsx`, `app-entry.jsx`: **삭제 완료**
-  - `test_workspace/demo_lib/`: 모든 kind 뱃지 확인용 13개 Java 파일 테스트 프로젝트 생성
-- 주요 파일: `frontend/src/components/MainPanel.jsx`, `main/java_indexer.py`
-- 상태: **미커밋**
+- `_extract_annotations()` 버그 수정 완료 (`main/java_indexer.py:33-47`)
+  - 수정: `_ANNOT_TYPES` 4종 세트 + `modifiers` 자식 노드 순회 추가
+  - 결과: `@WebServlet`, `@Data`, `@Getter`, `@Setter` 등 모든 어노테이션 정상 추출 확인
+- demo_lib 뱃지(P/C/I/E/R) 전체 표시 → API 검증 PASS
+- movie_collector 어노테이션 뱃지 → 버그 수정 후 API 검증 PASS
+- 상태: **`main/java_indexer.py` 수정 미커밋**
 
 ### ⚡ 다음 할 일 (우선순위 순)
-1. 변경사항 전체 커밋 (`git push origin actc3`)
-2. 앱 재시작 후 demo_lib 워크스페이스 선택 → 전체 뱃지(P/C/I/E/R) 표시 확인
-3. movie_collector 워크스페이스 → Spring 어노테이션(@Controller 등) 뱃지 표시 확인
+1. `main/java_indexer.py` 어노테이션 버그픽스 커밋 (`git push origin actc3`)
+2. ContextPanel 자동 링킹 (트리/그래프 뷰 API 연결 시)
+3. Sig AI Step 2 diff 파싱 폴백 개선
+4. 멀티앵커 병렬 처리 (Sig AI)
 
 ### ⚠️ 블로커/주의사항
-- kind 뱃지 캐시 이슈: `app.state.last_index`는 서버 재시작 전 캐시 → 워크스페이스 재인덱스 필요
 - sync 라우트에서 `asyncio.create_task()` 절대 사용 금지 → `BUS.publish_sync()` 사용
 - `main/checkpoint_utils.py` 의 `MANI`는 `_ManiProxy` (backward compat) — 직접 Path로 바꾸지 말 것
 - Maven 빌드: `pom.xml` 존재 여부로 감지, mvnw 없으면 PATH의 mvn 사용
@@ -37,7 +34,7 @@
 - 외부 AI 배지는 절대 제공자명 표시 금지 — "● 외부" 로만 표시
 
 ### 💡 한 줄 요약
-👉 **"트리뷰 뱃지/필드/어노테이션 + 진단 Maven 지원"**
+👉 **"어노테이션 추출 버그 수정 미커밋"**
 
 ---
 
